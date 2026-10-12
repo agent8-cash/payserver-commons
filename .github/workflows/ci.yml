@@ -62,8 +62,22 @@ jobs:
       # This makes the suite noticeably slower: the recovery round trips run
       # Argon2id at 64 MiB / t=3 unoptimised, twice per test. That cost is the
       # security property - do not lower the parameters to speed it up.
+      #
+      # No --lib: it would restrict the run to library unit tests and skip
+      # every integration target, including the exchange-rate provider tests
+      # that decide what amount an invoice asks for.
       - name: Tests (all features)
-        run: cargo nextest run --workspace --lib --all-features --no-fail-fast
+        run: cargo nextest run --workspace --all-features --no-fail-fast
+
+      # A test binary that compiles and runs nothing reports success, so
+      # assert the exchange-rate integration tests actually executed. When
+      # adding or removing one, change EXPECTED to match.
+      - name: Exchange-rate integration tests ran
+        env:
+          EXPECTED: "12"
+        run: |
+          cargo nextest run -p rates --all-features --test integration --no-fail-fast 2>&1 | tee nextest-rates.log
+          grep -E "Summary.* ${EXPECTED} tests? run: ${EXPECTED} passed" nextest-rates.log
 
   audit:
     name: Audit
