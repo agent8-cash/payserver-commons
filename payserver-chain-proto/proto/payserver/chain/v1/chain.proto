@@ -1,0 +1,187 @@
+// The chain adapter wire contract, v1.
+//
+// This file is the contract. The Rust traits in payserver-commons are a
+// convenience; anything a Rust adapter can express that this file cannot is a
+// design error. Adapters in other languages consume this file, pinned by tag.
+//
+// Versioning, which is stricter than the plugin API's because an adapter is a
+// peer process that may be older or newer than the orchestrator during a
+// rolling deploy:
+//   * Additive only within v1. New fields get new numbers. A number is never
+//     reused and a field's type never changes. Removal is `reserved`.
+//   * A breaking change is a new package, payserver.chain.v2, served alongside
+//     v1 during the transition.
+//   * Describe negotiates: the orchestrator picks the highest version both
+//     sides support and refuses loudly on an empty intersection.
+//   * Behaviour that varies by chain is a capability flag, never a version
+//     check.
+//
+// Value rules, enforced by the conversions in the Rust crate and expected of
+// every implementation:
+//   * Amounts are strings of 1..=78 ASCII decimal digits: no sign, no point,
+//     no separators. They are in the chain's base unit.
+//   * Addresses and transaction hashes are the chain's canonical text and are
+//     never case-folded, trimmed or otherwise rewritten by the adapter.
+//   * There is deliberately no "late paid" event. Whether a payment arrived
+//     after its invoice expired is decided by the orchestrator from the
+//     invoice's expiry; an adapter must never be told when an invoice expires.
+syntax = "proto3";
+
+package payserver.chain.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service ChainAdapter {
+  // Identity, supported contract versions, the chains served, capabilities.
+  rpc Describe(DescribeRequest) returns (DescribeResponse);
+  // Start watching an address. Idempotent on (chain_id, address, asset, watch_id).
+  rpc Watch(WatchRequest) returns (WatchResponse);
+  // Stop watching. Unwatching something not watched succeeds.
+  rpc Unwatch(UnwatchRequest) returns (UnwatchResponse);
+  // Requires capability "list_watched".
+  rpc ListWatched(ListWatchedRequest) returns (stream WatchedRef);
+  rpc Health(HealthRequest) returns (HealthResponse);
+  // Events in ascending seq order per adapter.
+  rpc SubscribeEvents(SubscribeEventsRequest) returns (stream ChainEvent);
+  // Tells the adapter the orchestrator has durably handled events up to a seq.
+  rpc AckEvents(AckEventsRequest) returns (AckEventsResponse);
+}
+
+message DescribeRequest {}
+
+message DescribeResponse {
+  string adapter_id = 1;
+  string adapter_version = 2;
+  // Packages the adapter serves, e.g. "payserver.chain.v1".
+  repeated string contract_versions = 3;
+  // The routing table and the authorisation scope: the orchestrator sends
+  // an adapter only these chains, and accepts events only for these chains.
+  repeated string chain_ids = 4;
+  // "replay.seq", "replay.height", "list_watched".
+  repeated string capabilities = 5;
+}
+
+message WatchRequest {
+  string chain_id = 1;
+  string address = 2;
+  // Token contract or equivalent; empty means the chain's native asset.
+  string asset = 3;
+  // Opaque to the adapter, echoed on every event for this watch.
+  string watch_id = 4;
+  // The adapter drops the watch itself after this instant, so a watch leaked
+  // by a lost Unwatch heals. Unset means no expiry.
+  google.protobuf.Timestamp expires_at = 5;
+}
+message WatchResponse {}
+
+message UnwatchRequest {
+  string chain_id = 1;
+  string address = 2;
+  string asset = 3;
+  string watch_id = 4;
+}
+message UnwatchResponse {}
+
+message ListWatchedRequest {
+  // Empty means every chain the adapter serves.
+  repeated string chain_ids = 1;
+}
+
+message WatchedRef {
+  string chain_id = 1;
+  string address = 2;
+  string asset = 3;
+  string watch_id = 4;
+  google.protobuf.Timestamp expires_at = 5;
+}
+
+message HealthRequest {}
+
+message ChainHealth {
+  string chain_id = 1;
+  bool ok = 2;
+  uint64 head_height = 3;
+  string detail = 4;
+}
+
+message HealthResponse {
+  repeated ChainHealth chains = 1;
+}
+
+message SubscribeEventsRequest {
+  // Subset of Describe.chain_ids; empty means all of them.
+  repeated string chain_ids = 1;
+  // Where to resume. Absent means live only.
+  oneof resume {
+    // Capability "replay.seq": events with seq greater than this.
+    uint64 after_seq = 2;
+    // Capability "replay.height": events at or above this block height.
+    uint64 from_height = 3;
+  }
+}
+
+message AckEventsRequest {
+  uint64 up_to_seq = 1;
+}
+message AckEventsResponse {}
+
+// A payment is one transfer into a watched address.
+message PaymentRef {
+  string tx_hash = 1;
+  // Position of the transfer within the transaction (log index, vout, ...).
+  uint32 index = 2;
+}
+
+message ChainEvent {
+  uint64 seq = 1;
+  string chain_id = 2;
+  oneof event {
+    PaymentDetected payment_detected = 10;
+    PaymentConfirmed payment_confirmed = 11;
+    PaymentReorged payment_reorged = 12;
+    ChainProgress chain_progress = 13;
+    AdapterStatus adapter_status = 14;
+  }
+}
+
+message PaymentDetected {
+  string watch_id = 1;
+  string address = 2;
+  string asset = 3;
+  PaymentRef payment = 4;
+  string amount = 5;
+}
+
+message PaymentConfirmed {
+  string watch_id = 1;
+  string address = 2;
+  string asset = 3;
+  PaymentRef payment = 4;
+  string amount = 5;
+  uint64 block_height = 6;
+  uint32 confirmations = 7;
+}
+
+// Names the payments that are no longer valid. How deep the fork was is the
+// adapter's business, not the orchestrator's.
+message PaymentReorged {
+  repeated PaymentRef retracted = 1;
+}
+
+// The chain's head moved. Drives the orchestrator's invoice-expiry sweep, so
+// it must keep flowing even when no watched address is active.
+message ChainProgress {
+  uint64 height = 1;
+  google.protobuf.Timestamp block_time = 2;
+}
+
+message AdapterStatus {
+  enum State {
+    STATE_UNSPECIFIED = 0;
+    STATE_HEALTHY = 1;
+    STATE_DEGRADED = 2;
+    STATE_DOWN = 3;
+  }
+  State state = 1;
+  string detail = 2;
+}
