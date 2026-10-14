@@ -291,25 +291,55 @@ where
             self.repo.update_device(&device).await?;
             id
         } else {
-            // Check device limit
+            // AT THE CAP, ATTACH TO THE LEAST RECENTLY USED DEVICE RATHER THAN REFUSE.
+            //
+            // The cap exists to bound stored credentials. Refusing here made it bound
+            // LOGINS, and permanently: freeing a slot needs a session, and getting a
+            // session needs a free slot. See least_recently_used_device.
+            //
+            // NOT SILENT. The cap being reached is information - if an eleventh device
+            // ever means something is wrong, that signal must survive this fix - so it
+            // is logged at warn, naming what the shared record now costs.
             let device_count = self.repo.count_active_devices(user.id).await?;
             if device_count >= self.config.max_devices_per_user {
-                return Err(AuthError::MaxDevicesReached(
-                    self.config.max_devices_per_user,
-                ));
+                match self.least_recently_used_device(user.id).await? {
+                    Some(mut lru) => {
+                        tracing::warn!(
+                            user_id = %user.id,
+                            device_id = %lru.id,
+                            cap = self.config.max_devices_per_user,
+                            "device cap reached; attaching this login to the least recently used \
+                             device instead of refusing it. That record now covers more than one \
+                             machine: its last-used time is the later of them, and revoking it \
+                             signs out all of them. Nothing was signed out here."
+                        );
+                        lru.last_used_at = Some(Utc::now());
+                        let id = lru.id;
+                        self.repo.update_device(&lru).await?;
+                        id
+                    }
+                    // No active device to attach to. At a cap of zero this is the honest
+                    // answer rather than a contradiction: zero devices are permitted, so
+                    // no login is.
+                    None => {
+                        return Err(AuthError::MaxDevicesReached(
+                            self.config.max_devices_per_user,
+                        ));
+                    }
+                }
+            } else {
+                // Create new device
+                let device = Device::new(
+                    user.id,
+                    request.device_name,
+                    request.device_type,
+                    user.encrypted_symmetric_key.clone(),
+                    user.kdf_params.clone(),
+                );
+                let new_device_id = device.id;
+                self.repo.create_device(&device).await?;
+                new_device_id
             }
-
-            // Create new device
-            let device = Device::new(
-                user.id,
-                request.device_name,
-                request.device_type,
-                user.encrypted_symmetric_key.clone(),
-                user.kdf_params.clone(),
-            );
-            let new_device_id = device.id;
-            self.repo.create_device(&device).await?;
-            new_device_id
         };
 
         // Update last login

@@ -2,6 +2,8 @@
 
 use std::sync::Arc;
 
+use chrono::Utc;
+
 use crate::error::AuthError;
 use crate::models::{
     CompletePasskeyRegistrationRequest, Device, DeviceId, DeviceType, PasskeyId, Session,
@@ -1223,5 +1225,115 @@ async fn passkey_only_user_can_complete_adding_a_second_passkey() {
     assert!(
         !matches!(err, AuthError::Repository(_)),
         "passkey-only account could not even reach WebAuthn verification: {err:?}"
+    );
+}
+
+// --- THE DEVICE CAP MUST BOUND CREDENTIALS, NOT LOGINS -----------------------------
+//
+// The cap had no test at all, which is part of why it shipped as a permanent lockout:
+// refusing at the cap meant freeing a slot needed a session and getting a session
+// needed a free slot, so a user who reached ten could never log in again.
+//
+// least_recently_used_device is what the login paths consult instead of refusing.
+// Both halves are here: it must pick the OLDEST, and it must pick nothing when there
+// is nothing to pick - a helper that always returns something would make the cap
+// unenforceable rather than merely non-blocking.
+
+#[tokio::test]
+async fn lru_device_picks_the_oldest_by_last_used() {
+    let repo = Arc::new(InMemoryRepository::new());
+    let user_id = UserId::new();
+
+    let mut oldest = seed_device(&repo, user_id, true).await;
+    oldest.last_used_at = Some(Utc::now() - chrono::Duration::days(30));
+    repo.update_device(&oldest).await.unwrap();
+
+    let mut newest = seed_device(&repo, user_id, true).await;
+    newest.last_used_at = Some(Utc::now());
+    repo.update_device(&newest).await.unwrap();
+
+    let service = AuthService::new(repo);
+    let got = service.least_recently_used_device(user_id).await.unwrap();
+    assert_eq!(
+        got.map(|d| d.id),
+        Some(oldest.id),
+        "the least recently used device is the one with the oldest last_used_at"
+    );
+}
+
+#[tokio::test]
+async fn lru_device_treats_never_used_as_older_than_used() {
+    // A device that has never been used is older than one used since. Sorting its
+    // absent last_used_at as itself would order every never-used device together at
+    // one end regardless of when it was created, which is not what the name means.
+    let repo = Arc::new(InMemoryRepository::new());
+    let user_id = UserId::new();
+
+    let never_used = seed_device(&repo, user_id, true).await;
+    assert!(never_used.last_used_at.is_none(), "fixture: never used");
+
+    let mut used = seed_device(&repo, user_id, true).await;
+    used.last_used_at = Some(Utc::now());
+    repo.update_device(&used).await.unwrap();
+
+    let service = AuthService::new(repo);
+    let got = service.least_recently_used_device(user_id).await.unwrap();
+    assert_eq!(got.map(|d| d.id), Some(never_used.id));
+}
+
+#[tokio::test]
+async fn lru_device_ignores_revoked_devices() {
+    // A revoked device is not somewhere a login may be attached: reusing one would
+    // resurrect access the user deliberately removed.
+    let repo = Arc::new(InMemoryRepository::new());
+    let user_id = UserId::new();
+
+    let mut revoked = seed_device(&repo, user_id, false).await;
+    revoked.last_used_at = Some(Utc::now() - chrono::Duration::days(99));
+    repo.update_device(&revoked).await.unwrap();
+
+    let active = seed_device(&repo, user_id, true).await;
+
+    let service = AuthService::new(repo);
+    let got = service.least_recently_used_device(user_id).await.unwrap();
+    assert_eq!(
+        got.map(|d| d.id),
+        Some(active.id),
+        "the revoked device is older but must not be chosen"
+    );
+}
+
+#[tokio::test]
+async fn lru_device_is_none_when_the_user_has_no_active_device() {
+    // The control that keeps the cap enforceable. At a cap of zero, or with every
+    // device revoked, there is nothing to attach to and the caller must go on
+    // refusing - a helper that invented a device here would make the cap meaningless.
+    let repo = Arc::new(InMemoryRepository::new());
+    let user_id = UserId::new();
+    seed_device(&repo, user_id, false).await;
+
+    let service = AuthService::new(repo);
+    let got = service.least_recently_used_device(user_id).await.unwrap();
+    assert!(got.is_none(), "no active device means no device to reuse");
+}
+
+#[tokio::test]
+async fn lru_device_ignores_another_users_devices() {
+    let repo = Arc::new(InMemoryRepository::new());
+    let mine = UserId::new();
+    let theirs = UserId::new();
+
+    let mut old_other = seed_device(&repo, theirs, true).await;
+    old_other.last_used_at = Some(Utc::now() - chrono::Duration::days(99));
+    repo.update_device(&old_other).await.unwrap();
+
+    let own = seed_device(&repo, mine, true).await;
+
+    let service = AuthService::new(repo);
+    let got = service.least_recently_used_device(mine).await.unwrap();
+    assert_eq!(
+        got.map(|d| d.id),
+        Some(own.id),
+        "another user's older device must never be chosen"
     );
 }

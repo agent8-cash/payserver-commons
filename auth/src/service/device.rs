@@ -65,6 +65,47 @@ where
         self.repo.deactivate_device(device_id).await
     }
 
+    /// At the device cap, the device this login should attach to instead of being
+    /// refused: the least recently used active one.
+    ///
+    /// THE CAP BOUNDS STORED CREDENTIALS. IT MUST NOT BOUND LOGINS.
+    ///
+    /// Refusing at the cap made the cap a permanent lockout. Freeing a slot needs a
+    /// session - `revoke_device` takes one - and getting a session needs a free slot,
+    /// so a user at the cap could never log in again, and the error telling them to
+    /// "remove a device first" named an action they had no way to perform. Reported
+    /// on testnet 2026-10-14 by a user who had reached ten.
+    ///
+    /// REUSE, NOT EVICTION. Nothing is deleted and nobody is signed out:
+    /// `revoke_device` deletes a device's sessions, and this does not call it.
+    ///
+    /// The cost is real but is not a sign-out: two machines then share one device
+    /// record, so its "last used" means the later of the two, and revoking it signs
+    /// out both. That is logged at the call site rather than left to be discovered.
+    ///
+    /// Returns `None` only when there is no active device to attach to. At a cap of
+    /// zero that is the honest answer - a cap of zero permits no devices, so it
+    /// permits no logins - and the caller goes on refusing.
+    pub(crate) async fn least_recently_used_device(
+        &self,
+        user_id: UserId,
+    ) -> Result<Option<Device>> {
+        let mut active: Vec<Device> = self
+            .repo
+            .get_devices_for_user(user_id)
+            .await?
+            .into_iter()
+            .filter(|d| d.is_active)
+            .collect();
+
+        // A never-used device sorts by when it was created, so it is older than one
+        // used since. Sorting `None` as itself would put never-used devices either
+        // always first or always last depending on the ordering, which is not what
+        // "least recently used" means.
+        active.sort_by_key(|d| d.last_used_at.unwrap_or(d.created_at));
+        Ok(active.into_iter().next())
+    }
+
     /// Resolve the device id a client sent on login into a device we can reuse.
     ///
     /// Returns `None` when the id is unusable — unknown, owned by someone else,
