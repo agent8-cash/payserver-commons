@@ -306,23 +306,8 @@ where
             self.repo.update_device(&updated).await?;
             id
         } else {
-            let active_count = self.repo.count_active_devices(user.id).await?;
-            if active_count >= self.config.max_devices_per_user {
-                return Err(AuthError::MaxDevicesReached(
-                    self.config.max_devices_per_user,
-                ));
-            }
-
-            let new_device = Device::new(
-                user.id,
-                request.device_name.clone(),
-                request.device_type,
-                user.encrypted_symmetric_key.clone(),
-                user.kdf_params.clone(),
-            );
-            let id = new_device.id;
-            self.repo.create_device(&new_device).await?;
-            id
+            self.device_for_new_login(&user, request.device_name.clone(), request.device_type)
+                .await?
         };
 
         // Update last login
