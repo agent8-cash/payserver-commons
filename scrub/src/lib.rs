@@ -102,9 +102,31 @@ pub fn is_sensitive_key(key: &str) -> bool {
 /// on the side of over-redaction.
 #[must_use]
 pub fn redact_secrets(input: &str) -> String {
+    redact_secrets_except(input, &[])
+}
+
+/// [`redact_secrets`], except that a 12+ word run which is *exactly* one of
+/// `exempt` is left alone.
+///
+/// The word-run rule is a shape rule: it fires on any twelve lowercase words,
+/// English prose included. That is the right default for text nobody can
+/// enumerate (stdout, anything a dependency prints). For a corpus the caller
+/// authors itself, such as its own alert messages, the caller knows which
+/// strings are prose and passes them here. The library cannot know its
+/// consumers' messages, so the list lives with the caller.
+///
+/// Matching is on the whole run, so an exempt sentence with one extra word
+/// before or after it is no longer exempt.
+#[must_use]
+pub fn redact_secrets_except(input: &str, exempt: &[&str]) -> String {
     let mut out = Cow::Borrowed(input);
     for rule in RULES {
-        if let Some(redacted) = replace_all(&out, *rule) {
+        let redacted = if std::ptr::fn_addr_eq(*rule, mnemonic as Rule) {
+            replace_all(&out, |text, at| mnemonic_except(text, at, exempt))
+        } else {
+            replace_all(&out, *rule)
+        };
+        if let Some(redacted) = redacted {
             out = Cow::Owned(redacted);
         }
     }
@@ -113,7 +135,10 @@ pub fn redact_secrets(input: &str) -> String {
 
 /// Leftmost, non-overlapping replacement of every match — `Regex::replace_all`
 /// semantics. `None` when the rule never matched, so the input is left alone.
-fn replace_all(input: &str, rule: Rule) -> Option<String> {
+fn replace_all(
+    input: &str,
+    rule: impl Fn(&str, usize) -> Option<(usize, String)>,
+) -> Option<String> {
     let mut out = String::new();
     let mut copied = 0;
     let mut at = 0;
@@ -218,9 +243,15 @@ fn bare_hex(input: &str, at: usize) -> Option<(usize, String)> {
     (end - at == 64 && at_word_end(input, end)).then(|| (end, "[redacted-hex]".to_string()))
 }
 
-/// `\b(?:[a-z]+\s+){11,}[a-z]+\b` — BIP-39 mnemonics, i.e. 12+ consecutive
-/// lowercase words.
+/// `\b(?:[a-z]+\s+){11,}[a-z]+\b` — 12+ consecutive lowercase words, the shape
+/// of a BIP-39 recovery phrase. "Whitespace" here also covers non-breaking and
+/// invisible separators (see [`separator_end`]), because a phrase pasted from a
+/// rendered page carries them and the rule would otherwise be trivially evaded.
 fn mnemonic(input: &str, at: usize) -> Option<(usize, String)> {
+    mnemonic_except(input, at, &[])
+}
+
+fn mnemonic_except(input: &str, at: usize, exempt: &[&str]) -> Option<(usize, String)> {
     if !at_word_start(input, at) {
         return None;
     }
@@ -232,13 +263,40 @@ fn mnemonic(input: &str, at: usize) -> Option<(usize, String)> {
         }
         words += 1;
         end = word;
-        let space = run(input, word, |b| b.is_ascii_whitespace());
+        let space = word_separator_end(input, word);
         if space == word {
             break;
         }
         pos = space;
     }
-    (words >= 12).then(|| (end, "[redacted: 12+ word run]".to_string()))
+    if words < 12 {
+        return None;
+    }
+    // An exempt run is consumed whole and kept verbatim; returning `None`
+    // would let the scan resume one word in and redact the tail of it.
+    let run_text = &input[at..end];
+    let replacement = if exempt.contains(&run_text) {
+        run_text.to_string()
+    } else {
+        "[redacted: 12+ word run]".to_string()
+    };
+    Some((end, replacement))
+}
+
+/// End of the run of separators starting at `from`: Unicode whitespace
+/// (including U+00A0) plus the zero-width and invisible characters that render
+/// as nothing (U+200B..=U+200D, U+2060..=U+2064, U+FEFF).
+fn word_separator_end(input: &str, from: usize) -> usize {
+    let rest = &input[from..];
+    let len: usize = rest
+        .chars()
+        .take_while(|c| {
+            c.is_whitespace()
+                || matches!(c, '\u{200B}'..='\u{200D}' | '\u{2060}'..='\u{2064}' | '\u{FEFF}')
+        })
+        .map(char::len_utf8)
+        .sum();
+    from + len
 }
 
 /// `[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}` — customer PII.
@@ -358,7 +416,7 @@ fn next_boundary(input: &str, at: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::redact_secrets;
+    use super::{redact_secrets, redact_secrets_except};
 
     #[test]
     fn redacts_jwt() {
@@ -428,6 +486,48 @@ mod tests {
             "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
         );
         assert_eq!(out, "[redacted: 12+ word run]");
+    }
+
+    #[test]
+    fn exempt_prose_survives_but_only_on_exact_match() {
+        let prose = "invoice creation allowed on a standing that was never received or is older than the freshness bound";
+        assert_eq!(redact_secrets_except(prose, &[prose]), prose);
+        // One extra word makes it a different run, so it is no longer exempt.
+        let longer = format!("also {prose}");
+        assert_eq!(
+            redact_secrets_except(&longer, &[prose]),
+            "[redacted: 12+ word run]"
+        );
+        // The default entry point exempts nothing.
+        assert_eq!(redact_secrets(prose), "[redacted: 12+ word run]");
+    }
+
+    #[test]
+    fn exempting_prose_never_exempts_a_real_phrase() {
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        assert_eq!(
+            redact_secrets_except(phrase, &["some other sentence"]),
+            "[redacted: 12+ word run]"
+        );
+    }
+
+    #[test]
+    fn phrase_with_invisible_or_nonbreaking_separators_is_redacted() {
+        for sep in [
+            "\u{00A0}",
+            "\u{200B}",
+            "\u{2063}",
+            " \u{2063}",
+            "\u{FEFF}",
+            "\u{2060}",
+        ] {
+            let phrase = ["abandon"; 11].join(sep) + sep + "about";
+            assert_eq!(
+                redact_secrets(&phrase),
+                "[redacted: 12+ word run]",
+                "separator {sep:?}"
+            );
+        }
     }
 
     #[test]
