@@ -38,6 +38,63 @@ const RULES: &[Rule] = &[
     keyed_value,
 ];
 
+/// Every key name whose value is a secret: the one definition. Free text is
+/// scanned for `key: value` / `key=value` with these, and structured data
+/// (Sentry extras, breadcrumbs, JSON maps) is checked by [`is_sensitive_key`].
+///
+/// This is the union of what every consumer once kept for itself, so none of
+/// them may restate it. A service that needs one more extends this list
+/// visibly at its call site instead of keeping a parallel copy.
+pub const SENSITIVE_KEYS: &[&str] = &[
+    "password",
+    "passwd",
+    "secret",
+    "token",
+    "apikey",
+    "api_key",
+    "api-key",
+    "mnemonic",
+    "seed",
+    "privatekey",
+    "private_key",
+    "private-key",
+    "authorization",
+    "bearer",
+    "auth",
+    "dsn",
+    "credential",
+    "session",
+    "cookie",
+    "signature",
+];
+
+/// Keys that may be followed by a bare space and still introduce a value
+/// (`Bearer <tok>`, `token abc`); the original free-text set.
+const BARE_VALUE_KEYS: &[&str] = &[
+    "api_key",
+    "api-key",
+    "apikey",
+    "secret",
+    "password",
+    "passwd",
+    "token",
+    "mnemonic",
+    "seed",
+    "private_key",
+    "private-key",
+    "privatekey",
+    "authorization",
+    "bearer",
+];
+
+/// Whether a structured-data key names something whose value is a secret.
+/// Substring match, case-insensitive: `X-Auth-Header` and `sessionId` count.
+#[must_use]
+pub fn is_sensitive_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    SENSITIVE_KEYS.iter().any(|needle| key.contains(needle))
+}
+
 /// Redact secret-shaped substrings from a free-text string.
 ///
 /// Defence-in-depth for panic messages and stack traces, which routinely
@@ -181,7 +238,7 @@ fn mnemonic(input: &str, at: usize) -> Option<(usize, String)> {
         }
         pos = space;
     }
-    (words >= 12).then(|| (end, "[redacted-mnemonic]".to_string()))
+    (words >= 12).then(|| (end, "[redacted: 12+ word run]".to_string()))
 }
 
 /// `[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}` — customer PII.
@@ -209,18 +266,23 @@ fn email(input: &str, at: usize) -> Option<(usize, String)> {
     end.map(|end| (end, "[redacted-email]".to_string()))
 }
 
-/// `(?i)\b(api[_-]?key|secret|password|passwd|token|mnemonic|seed|private[_-]?key|authorization|bearer)\b(\s*[:=]\s*|\s+)("?)[^\s,;"']+`
+/// `(?i)\b(<SENSITIVE_KEYS>)\b(\s*[:=]\s*|\s+)("?)[^\s,;"']+`
 /// — `key: value` / `key=value` for sensitive keys, plus `Bearer <token>`. Key,
 /// separator and opening quote are kept; only the value is replaced.
 fn keyed_value(input: &str, at: usize) -> Option<(usize, String)> {
     if !at_word_start(input, at) {
         return None;
     }
-    let key = sensitive_key_end(input, at)?;
-    if !at_word_end(input, key) {
+    let (key_end, key) = sensitive_key_end(input, at)?;
+    if !at_word_end(input, key_end) {
         return None;
     }
-    let separated = separator_end(input, key)?;
+    let separated = separator_end(input, key_end)?;
+    // Everyday words (`auth failed`, `session expired`) are keys too, so
+    // outside the original set only an explicit `:` or `=` marks a value.
+    if !BARE_VALUE_KEYS.contains(&key) && !input[key_end..separated].contains([':', '=']) {
+        return None;
+    }
     let value = separated + usize::from(byte(input, separated) == Some(b'"'));
     let end = run(input, value, |b| {
         !b.is_ascii_whitespace() && !matches!(b, b',' | b';' | b'"' | b'\'')
@@ -228,33 +290,20 @@ fn keyed_value(input: &str, at: usize) -> Option<(usize, String)> {
     (end > value).then(|| (end, format!("{}[redacted]", &input[at..value])))
 }
 
-/// End offset of a sensitive key starting at `at`, case-insensitively.
-fn sensitive_key_end(input: &str, at: usize) -> Option<usize> {
-    // Spelled out rather than `api[_-]?key`, longest spelling first.
-    const KEYS: &[&str] = &[
-        "api_key",
-        "api-key",
-        "apikey",
-        "secret",
-        "password",
-        "passwd",
-        "token",
-        "mnemonic",
-        "seed",
-        "private_key",
-        "private-key",
-        "privatekey",
-        "authorization",
-        "bearer",
-    ];
-    KEYS.iter().find_map(|key| {
-        let end = at + key.len();
-        input
-            .as_bytes()
-            .get(at..end)
-            .is_some_and(|found| found.eq_ignore_ascii_case(key.as_bytes()))
-            .then_some(end)
-    })
+/// End offset of the longest sensitive key starting at `at`, case-insensitively.
+/// Longest wins so `authorization` is not cut short by `auth`.
+fn sensitive_key_end(input: &str, at: usize) -> Option<(usize, &'static str)> {
+    SENSITIVE_KEYS
+        .iter()
+        .filter_map(|key| {
+            let end = at + key.len();
+            input
+                .as_bytes()
+                .get(at..end)
+                .is_some_and(|found| found.eq_ignore_ascii_case(key.as_bytes()))
+                .then_some((end, *key))
+        })
+        .max_by_key(|(end, _)| *end)
 }
 
 /// `(\s*[:=]\s*|\s+)` — end offset of the separator between key and value.
@@ -378,7 +427,18 @@ mod tests {
         let out = redact_secrets(
             "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
         );
-        assert_eq!(out, "[redacted-mnemonic]");
+        assert_eq!(out, "[redacted: 12+ word run]");
+    }
+
+    #[test]
+    fn placeholder_states_the_shape_not_the_secret_kind() {
+        // A shape rule fires on prose as readily as on a seed phrase, so the
+        // label must not claim what the text was.
+        let out = redact_secrets(
+            "invoice creation allowed on a standing that was never received or is older than the freshness bound",
+        );
+        assert_eq!(out, "[redacted: 12+ word run]");
+        assert!(!out.contains("mnemonic"));
     }
 
     #[test]
@@ -391,5 +451,49 @@ mod tests {
     fn handles_multibyte_text() {
         let text = "façade ↔ merchant@example.com ↔ façade";
         assert_eq!(redact_secrets(text), "façade ↔ [redacted-email] ↔ façade");
+    }
+
+    #[test]
+    fn every_sensitive_key_is_matched() {
+        const EXPECTED: [&str; 20] = [
+            "password",
+            "passwd",
+            "secret",
+            "token",
+            "apikey",
+            "api_key",
+            "api-key",
+            "mnemonic",
+            "seed",
+            "privatekey",
+            "private_key",
+            "private-key",
+            "authorization",
+            "bearer",
+            "auth",
+            "dsn",
+            "credential",
+            "session",
+            "cookie",
+            "signature",
+        ];
+        assert_eq!(super::SENSITIVE_KEYS.len(), EXPECTED.len());
+        for key in EXPECTED {
+            assert!(super::SENSITIVE_KEYS.contains(&key), "{key} dropped");
+            assert!(super::is_sensitive_key(&key.to_uppercase()), "{key}");
+            let out = redact_secrets(&format!("{key}=hunter2value"));
+            assert!(!out.contains("hunter2value"), "{key} not redacted: {out}");
+        }
+        assert!(!super::is_sensitive_key("merchant_name"));
+    }
+
+    #[test]
+    fn everyday_words_need_an_explicit_separator() {
+        assert_eq!(
+            redact_secrets("auth failed for user"),
+            "auth failed for user"
+        );
+        assert_eq!(redact_secrets("session expired"), "session expired");
+        assert_eq!(redact_secrets("dsn: https://k@h/1"), "dsn: [redacted]");
     }
 }

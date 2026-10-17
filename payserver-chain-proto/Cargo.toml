@@ -1,0 +1,25 @@
+[package]
+name = "payserver-chain-proto"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+license = "MIT"
+description = "The chain adapter wire contract: the .proto, its generated code, and the validating conversions"
+
+# Deliberately not part of `types`: `types` is in the browser client's
+# dependency graph, and prost and tonic must never be.
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["alloc"] }
+prost = "0.14"
+prost-types = "0.14"
+thiserror = "2.0"
+tonic = { version = "0.14", features = ["codegen"] }
+tonic-prost = "0.14"
+
+[build-dependencies]
+# Vendored so building needs no protoc on the machine.
+protoc-bin-vendored = "3"
+tonic-prost-build = "0.14"
+
+[dev-dependencies]
+proptest = "1"

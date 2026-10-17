@@ -394,6 +394,12 @@ impl PluginEngine {
         PluginInstance::new(&self.engine, module, Some(calls))
     }
 
+    /// How often the epoch advances: the resolution of every tick-counted
+    /// deadline.
+    pub fn tick(&self) -> Duration {
+        self.tick
+    }
+
     /// The number of epoch ticks that will elapse in at least `deadline`,
     /// rounded up and never zero — a zero deadline would mean "already
     /// expired" rather than "as soon as possible".
@@ -756,6 +762,11 @@ pub enum PluginCallError {
     Deserialize(String),
     #[error("plugin call failed: {0}")]
     Other(String),
+    /// The plugin's instance stayed busy with another call for the whole
+    /// deadline, so this call never started. A plugin runs one call at a
+    /// time; this is the wall-clock bound on queueing for it.
+    #[error("timed out waiting for the plugin's instance to free up")]
+    InstanceBusy,
 }
 
 /// Test-only WAT fixtures for the ticket's five failure modes, shared with
