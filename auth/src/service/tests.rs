@@ -1146,6 +1146,91 @@ async fn reusable_device_ignores_a_revoked_device() {
 }
 
 // ========================================================================
+// Device cap on login
+// ========================================================================
+//
+// Revoking a device needs a session, and a session needs a login, so a login
+// refused because the account is full can never be remedied from inside the
+// product. At the cap a login re-uses the least recently used device.
+
+fn capped_service(cap: u32) -> (Arc<InMemoryRepository>, AuthService<InMemoryRepository>) {
+    let repo = Arc::new(InMemoryRepository::new());
+    let config = super::AuthConfig {
+        max_devices_per_user: cap,
+        ..Default::default()
+    };
+    (repo.clone(), AuthService::with_config(repo, config))
+}
+
+async fn seed_user(repo: &InMemoryRepository) -> User {
+    let user = User::new(
+        "cap@example.com".to_string(),
+        crypto::KdfParams::default(),
+        crypto::EncryptedBlob {
+            ciphertext: vec![1],
+            iv: vec![2],
+            mac: vec![3],
+        },
+        "hash".to_string(),
+    );
+    repo.create_user(&user).await.unwrap();
+    user
+}
+
+#[tokio::test]
+async fn login_below_the_cap_registers_a_new_device() {
+    let (repo, service) = capped_service(2);
+    let user = seed_user(&repo).await;
+    seed_device(&repo, user.id, true).await;
+
+    let id = service
+        .device_for_new_login(&user, "new".to_string(), DeviceType::Browser)
+        .await
+        .unwrap();
+
+    assert_eq!(repo.count_active_devices(user.id).await.unwrap(), 2);
+    assert_eq!(repo.get_device(id).await.unwrap().unwrap().name, "new");
+}
+
+#[tokio::test]
+async fn login_at_the_cap_reuses_the_least_recently_used_device() {
+    let (repo, service) = capped_service(2);
+    let user = seed_user(&repo).await;
+    let mut old = seed_device(&repo, user.id, true).await;
+    let mut recent = seed_device(&repo, user.id, true).await;
+    old.last_used_at = Some(chrono::Utc::now() - chrono::Duration::days(30));
+    recent.last_used_at = Some(chrono::Utc::now());
+    repo.update_device(&old).await.unwrap();
+    repo.update_device(&recent).await.unwrap();
+
+    let id = service
+        .device_for_new_login(&user, "fresh".to_string(), DeviceType::Browser)
+        .await
+        .expect("a full account must still be able to log in");
+
+    assert_eq!(id, old.id, "the stalest device is the one reclaimed");
+    assert_eq!(repo.count_active_devices(user.id).await.unwrap(), 2);
+    assert_eq!(repo.get_device(id).await.unwrap().unwrap().name, "fresh");
+    assert_eq!(
+        repo.get_device(recent.id).await.unwrap().unwrap().name,
+        "test device"
+    );
+}
+
+#[tokio::test]
+async fn repeated_logins_at_the_cap_never_grow_the_device_count() {
+    let (repo, service) = capped_service(3);
+    let user = seed_user(&repo).await;
+    for _ in 0..25 {
+        service
+            .device_for_new_login(&user, "b".to_string(), DeviceType::Browser)
+            .await
+            .unwrap();
+    }
+    assert_eq!(repo.count_active_devices(user.id).await.unwrap(), 3);
+}
+
+// ========================================================================
 // Adding a second passkey (existing user)
 // ========================================================================
 //
