@@ -2,6 +2,8 @@
 
 use leptos::prelude::*;
 
+use crate::components::copy::CopyButton;
+
 /// Recovery setup step.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RecoveryStep {
@@ -55,6 +57,10 @@ pub fn RecoverySetup(
 
     let words = mnemonic_words.clone();
     let word_count = words.len();
+    // Built here rather than inside the view: `words` is moved into the closure
+    // below, and the label states the real count rather than a hardcoded 24 -
+    // this component is also used for 12-word phrases.
+    let phrase_for_copy = mnemonic_words.join(" ");
 
     let handle_continue = move |_| {
         set_step.set(RecoveryStep::Confirm);
@@ -78,6 +84,10 @@ pub fn RecoverySetup(
             {move || match step.get() {
                 RecoveryStep::ShowPhrase => {
                     let words = words.clone();
+                    // Cloned per render for the same reason `words` is: this is
+                    // an FnMut reactive closure, so moving the String out of the
+                    // capture does not compile.
+                    let phrase_for_copy = phrase_for_copy.clone();
                     view! {
                         <div class="ps-recovery-show">
                             <h3 class="ps-recovery-title">"Save Your Recovery Phrase"</h3>
@@ -101,6 +111,26 @@ pub fn RecoverySetup(
                                         </div>
                                     }
                                 }).collect_view()}
+                            </div>
+
+                            // Space-separated, NOT the numbered form on screen:
+                            // that is what every wallet's restore field accepts,
+                            // and a merchant pasting "1 abandon 2 ability" into
+                            // one would be told the phrase is invalid with no
+                            // hint as to why.
+                            //
+                            // `CopyButton` and not a local handler: it awaits the
+                            // clipboard write before reporting success. The
+                            // checkout page learned that the hard way, and a copy
+                            // button that lies about a recovery phrase is worse
+                            // than no button - the merchant closes the page
+                            // believing they have it.
+                            <div class="ps-mnemonic-copy">
+                                <CopyButton
+                                    text=phrase_for_copy
+                                    label=format!("Copy all {word_count} words")
+                                    class="ps-btn-sm"
+                                />
                             </div>
 
                             {account_id.clone().map(|id| view! {
