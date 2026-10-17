@@ -1,0 +1,104 @@
+# Forgejo copy of .github/workflows/ci.yml. Runs in
+# catthehacker/ubuntu:act-22.04 on the rcs-docker runner: docker-only,
+# unprivileged, no docker socket, no host paths. That image ships no Rust, so
+# the rust-toolchain step below is load-bearing here where it was redundant on
+# a host runner.
+#
+# Forgejo copy of .github/workflows/ci.yml. GitHub reads only .github/, Forgejo
+# reads only .forgejo/ when it exists, so the two coexist and neither runs twice.
+#
+# Three forced differences from the GitHub copy, measured not assumed:
+#   - dtolnay/rust-toolchain and Swatinem/rust-cache are NOT published on
+#     code.forgejo.org, so a bare name fails to resolve. The full-URL form works
+#     on Forgejo and is INVALID on GitHub, which is why the file is duplicated
+#     rather than shared.
+#   - runs-on names a self-hosted label; this instance has no ubuntu-latest.
+#   - sudo apt-get is dropped. Not because it cannot work - the container runs as
+#     root, has sudo, and apt-get install succeeds (measured) - but because mold
+#     is a link-time optimisation, not a correctness requirement, and one fewer
+#     network install is one fewer way for this gate to go red without a code
+#     change.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: rcs-docker
+    steps:
+      - uses: actions/checkout@v4
+
+      # This repository is public. A ticket id in a source file leaks the
+      # title and shape of unreleased work, and an outside reader cannot open
+      # the tracker anyway. Ticket ids belong in the commit message and PR
+      # title, not the tree - see CLAUDE.md.
+      - name: No ticket ids or tracker links in source
+        run: ./scripts/check-no-ticket-refs.sh
+
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Tolerated, not required: the Forgejo cache backend is unverified in
+      # container mode, and a cache miss must not read as a broken gate. Step-level
+      # continue-on-error is honoured here (job-level is silently ignored).
+      - uses: https://github.com/Swatinem/rust-cache@v2
+        continue-on-error: true
+
+      - name: Install nextest
+        run: |
+          command -v cargo-nextest >/dev/null && exit 0
+          curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      # --all-features is the point of this step. ui-kit's `auth` feature is
+      # optional, so a default build never compiles ui-kit/src/auth - login,
+      # registration, recovery. That module was therefore never linted at all
+      # and had accumulated 83 findings; three E0425s once reached a green PR
+      # (2026-09-06), and a dead binding shipped green in #15. Both were
+      # invisible to a clippy step that did not build the code.
+      #
+      # The backlog is cleared - 78 auto-fixed, 5 redundant locals by hand - so
+      # this is one step that denies rustc AND clippy warnings across every
+      # feature, instead of a lenient `check` beside a clippy run that skipped
+      # half the crate.
+      - name: Clippy (all features)
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # --all-features here for the same reason as the clippy step above:
+      # without it `cargo nextest run` never
+      # builds ui-kit's `auth` module, so the registration-derivation tests in
+      # register_page.rs would sit in the tree reading as coverage and never
+      # execute. A test CI does not run is worse than a known gap.
+      #
+      # This makes the suite noticeably slower: the recovery round trips run
+      # Argon2id at 64 MiB / t=3 unoptimised, twice per test. That cost is the
+      # security property - do not lower the parameters to speed it up.
+      - name: Tests (all features)
+        run: cargo nextest run --workspace --lib --all-features --no-fail-fast
+
+  audit:
+    name: Audit
+    runs-on: rcs-docker
+    if: github.ref == 'refs/heads/main'
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        run: cargo audit
+        continue-on-error: true
