@@ -291,25 +291,8 @@ where
             self.repo.update_device(&device).await?;
             id
         } else {
-            // Check device limit
-            let device_count = self.repo.count_active_devices(user.id).await?;
-            if device_count >= self.config.max_devices_per_user {
-                return Err(AuthError::MaxDevicesReached(
-                    self.config.max_devices_per_user,
-                ));
-            }
-
-            // Create new device
-            let device = Device::new(
-                user.id,
-                request.device_name,
-                request.device_type,
-                user.encrypted_symmetric_key.clone(),
-                user.kdf_params.clone(),
-            );
-            let new_device_id = device.id;
-            self.repo.create_device(&device).await?;
-            new_device_id
+            self.device_for_new_login(&user, request.device_name, request.device_type)
+                .await?
         };
 
         // Update last login
