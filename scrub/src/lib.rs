@@ -238,7 +238,7 @@ fn mnemonic(input: &str, at: usize) -> Option<(usize, String)> {
         }
         pos = space;
     }
-    (words >= 12).then(|| (end, "[redacted-mnemonic]".to_string()))
+    (words >= 12).then(|| (end, "[redacted: 12+ word run]".to_string()))
 }
 
 /// `[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}` — customer PII.
@@ -427,7 +427,18 @@ mod tests {
         let out = redact_secrets(
             "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about",
         );
-        assert_eq!(out, "[redacted-mnemonic]");
+        assert_eq!(out, "[redacted: 12+ word run]");
+    }
+
+    #[test]
+    fn placeholder_states_the_shape_not_the_secret_kind() {
+        // A shape rule fires on prose as readily as on a seed phrase, so the
+        // label must not claim what the text was.
+        let out = redact_secrets(
+            "invoice creation allowed on a standing that was never received or is older than the freshness bound",
+        );
+        assert_eq!(out, "[redacted: 12+ word run]");
+        assert!(!out.contains("mnemonic"));
     }
 
     #[test]
