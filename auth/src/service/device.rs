@@ -132,7 +132,15 @@ where
                 .min_by_key(|d| d.last_used_at.unwrap_or(d.created_at));
 
             if let Some(mut device) = lru {
-                tracing::info!(device_id = %device.id, "device cap reached on login; re-using least recently used device");
+                // A warning, and carrying the account: the device list is the only
+                // place a user could notice a machine that is not theirs, and an
+                // attach to a full account no longer adds a row there. Ids only -
+                // never the key blob or a session token.
+                tracing::warn!(
+                    user_id = %user.id,
+                    device_id = %device.id,
+                    "device cap reached on login; re-using least recently used device"
+                );
                 device.name = name;
                 device.device_type = device_type;
                 device.encrypted_symmetric_key = user.encrypted_symmetric_key.clone();
