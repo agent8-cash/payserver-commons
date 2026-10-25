@@ -1,0 +1,22 @@
+[advisories]
+ignore = [
+    # TIME-BOXED. Timing variability in operations crypto-bigint intends to
+    # be constant-time (published 2026-10-23, fixed upstream at >=0.7.6).
+    # REVIEW BY 2026-11-24 - re-run `cargo update -p crypto-bigint` then; take
+    # the bump if elliptic-curve/k256 have moved to a compatible chain.
+    #
+    # PATH: crypto-bigint 0.5.5 -> elliptic-curve 0.13.8 -> ecdsa 0.16.9 ->
+    # k256 0.13.4 (auth/Cargo.toml, direct dep). Blocked on a parent semver
+    # bump: elliptic-curve 0.13.8 pins `crypto-bigint = "0.5"`, and k256 is
+    # pinned `^0.13` in auth/Cargo.toml - `cargo update -p crypto-bigint`
+    # alone is a no-op; reaching the fix needs k256 bumped to 0.14 (or
+    # later), which is its own reviewed migration, not this.
+    #
+    # WHY SAFE HERE: auth/src/service/wallet.rs only uses
+    # k256::ecdsa::{RecoveryId, Signature, VerifyingKey} - ECDSA signature
+    # RECOVERY/VERIFICATION on public data. No production code ever puts a
+    # private scalar through a crypto-bigint-adjacent op; the only
+    # `SigningKey` (private-scalar) use is in auth/src/service/tests.rs, test
+    # fixtures only. A constant-time advisory has nothing secret to leak here.
+    "RUSTSEC-2026-0387",
+]
