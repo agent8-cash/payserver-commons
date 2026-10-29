@@ -62,8 +62,30 @@ jobs:
       # This makes the suite noticeably slower: the recovery round trips run
       # Argon2id at 64 MiB / t=3 unoptimised, twice per test. That cost is the
       # security property - do not lower the parameters to speed it up.
+      #
+      # No --lib: it restricts the run to library unit tests, which left
+      # rates/tests/integration.rs - the wiremock tests for exchange-rate
+      # parsing, inverted pairs and failover, i.e. the code that prices every
+      # invoice - compiled by clippy and never executed.
       - name: Tests (all features)
-        run: cargo nextest run --workspace --lib --all-features --no-fail-fast
+        run: cargo nextest run --workspace --all-features --no-fail-fast
+
+      # A binary that compiles and runs zero tests reports success, so assert
+      # the count of the rates integration target rather than a green run. Bump
+      # EXPECTED when a test is added to or removed from rates/tests/integration.rs.
+      #
+      # The escapes are stripped before matching: CARGO_TERM_COLOR=always makes
+      # nextest colour the numbers in its summary line, and a plain-text pattern
+      # can never match the coloured text. pipefail so a failing run is not
+      # masked by the pipe into sed.
+      - name: Rates integration tests ran (count)
+        env:
+          EXPECTED: 12
+        run: |
+          set -o pipefail
+          cargo nextest run -p rates --all-features --test integration --no-fail-fast 2>&1 \
+            | sed -r 's/\x1b\[[0-9;]*m//g' | tee nextest-rates.log
+          grep -E "Summary.* ${EXPECTED} tests? run: ${EXPECTED} passed" nextest-rates.log
 
   audit:
     name: Audit

@@ -77,7 +77,20 @@ impl KrakenRateProvider {
         let url = format!("{}/Ticker?pair={}", self.api_url, pair_name);
         tracing::debug!(pair = %pair_name, "Fetching rate from Kraken");
 
-        let response: KrakenTickerResponse = self.client.get(&url).send().await?.json().await?;
+        let http = self.client.get(&url).send().await?;
+
+        // A throttled request is a statement about this client, not a
+        // malformed body. Left to the JSON decoder it surfaces as an opaque
+        // "error decoding response body" that hides the real cause. No retry
+        // here: retrying a throttled caller only prolongs the throttling, and
+        // the fallback and cache layers above already decide what to do.
+        if http.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(RateError::ProviderError(format!(
+                "kraken returned 429 for \"{pair_name}\""
+            )));
+        }
+
+        let response: KrakenTickerResponse = http.json().await?;
 
         if !response.error.is_empty() {
             let error_msg = response.error.join(", ");
@@ -258,5 +271,25 @@ mod tests {
     fn test_kraken_provider_name() {
         let provider = KrakenRateProvider::new(None);
         assert_eq!(provider.name(), "kraken");
+    }
+
+    #[tokio::test]
+    async fn test_throttled_response_is_reported_as_such() {
+        use wiremock::matchers::method;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .respond_with(ResponseTemplate::new(429).set_body_string("Too Many Requests"))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let provider = KrakenRateProvider::new(Some(server.uri()));
+        let err = provider.get_rate("USD", "BTC").await.unwrap_err();
+        match err {
+            RateError::ProviderError(msg) => assert!(msg.contains("429"), "{msg}"),
+            other => panic!("expected ProviderError, got {other:?}"),
+        }
     }
 }

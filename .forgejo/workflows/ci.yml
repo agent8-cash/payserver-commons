@@ -1,23 +1,27 @@
-# Forgejo copy of .github/workflows/ci.yml. Runs in
-# catthehacker/ubuntu:act-22.04 on the rcs-docker runner: docker-only,
-# unprivileged, no docker socket, no host paths. That image ships no Rust, so
-# the rust-toolchain step below is load-bearing here where it was redundant on
-# a host runner.
+# THE FORGEJO COPY of .github/workflows/ci.yml. A COPY AND NOT A MOVE, for two
+# reasons that are both one-way:
 #
-# Forgejo copy of .github/workflows/ci.yml. GitHub reads only .github/, Forgejo
-# reads only .forgejo/ when it exists, so the two coexist and neither runs twice.
+#   `uses:` carries a FULL URL for any action not published on code.forgejo.org.
+#   Forgejo resolves a bare `owner/action` against its own registry, so
+#   `dtolnay/rust-toolchain@stable` would not resolve here - and the full-URL form
+#   is a form GitHub rejects. The two files cannot be the same bytes.
 #
-# Three forced differences from the GitHub copy, measured not assumed:
-#   - dtolnay/rust-toolchain and Swatinem/rust-cache are NOT published on
-#     code.forgejo.org, so a bare name fails to resolve. The full-URL form works
-#     on Forgejo and is INVALID on GitHub, which is why the file is duplicated
-#     rather than shared.
-#   - runs-on names a self-hosted label; this instance has no ubuntu-latest.
-#   - sudo apt-get is dropped. Not because it cannot work - the container runs as
-#     root, has sudo, and apt-get install succeeds (measured) - but because mold
-#     is a link-time optimisation, not a correctness requirement, and one fewer
-#     network install is one fewer way for this gate to go red without a code
-#     change.
+#   `runs-on: rcs-docker` names this forge's container runner. `ubuntu-latest` is
+#   served here too, mapped to docker://node:22-bookworm, but every other port in
+#   the fleet names rcs-docker and one spelling is easier to reason about than two.
+#
+# NOTHING IS DROPPED. Both jobs are ported: neither declares a service container
+# and neither uploads artifacts, which are the two platform gaps that cost
+# ethpayserver its `Test` and `E2E` jobs and payserver-billing three of six.
+# commons is pure Rust with no fixtures, so it ports whole.
+#
+# THE POINT OF THE DIRECTORY, beyond running CI here: Forgejo reads
+# .github/workflows only as a FALLBACK, when .forgejo/workflows is absent. With
+# no directory here this repository's GitHub workflows were live on this forge
+# naming `ubuntu-latest`, which nothing served until today - so runs queued and
+# were evicted by the next push. Measured across the fleet 2026-10-20:
+# ethpayserver 899 runs, 893 cancelled, zero successes. This directory is what
+# takes that fallback away.
 name: CI
 
 on:
@@ -27,6 +31,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
 
 jobs:
   verify:
@@ -46,15 +51,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Tolerated, not required: the Forgejo cache backend is unverified in
-      # container mode, and a cache miss must not read as a broken gate. Step-level
-      # continue-on-error is honoured here (job-level is silently ignored).
       - uses: https://github.com/Swatinem/rust-cache@v2
-        continue-on-error: true
 
-      - name: Install nextest
+      - name: Install mold + nextest
         run: |
-          command -v cargo-nextest >/dev/null && exit 0
+          sudo apt-get update && sudo apt-get install -y mold
           curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
 
       - name: Format check
@@ -88,17 +89,35 @@ jobs:
       - name: Tests (all features)
         run: cargo nextest run --workspace --lib --all-features --no-fail-fast
 
+  # THE CONDITION IS ON THE STEPS, NOT THE JOB, and that is a Forgejo
+  # difference rather than a style choice.
+  #
+  # With `if:` at JOB level and the condition false, this forge leaves the job's
+  # commit status at `pending / Has started running` and never resolves it.
+  # Measured on this PR: the RUN finished `success` while the Audit status stayed
+  # pending indefinitely - and merge-pr.sh correctly refuses a queued check,
+  # because a queued job is could-not-run and never a pass. So every pull request
+  # here would have been blocked for ever by a job that was supposed to skip.
+  #
+  # (A job skipped because of `needs:` DOES resolve - ethpayserver's Audit reports
+  # `success / Has been skipped` that way. It is the job-level `if` that hangs.)
+  #
+  # With the condition on each step, the job starts, its status resolves, and it
+  # does nothing off main at the cost of one container start.
   audit:
     name: Audit
     runs-on: rcs-docker
-    if: github.ref == 'refs/heads/main'
     env:
       RUSTFLAGS: ""
     steps:
       - uses: actions/checkout@v4
+        if: github.ref == 'refs/heads/main'
       - uses: https://github.com/dtolnay/rust-toolchain@stable
+        if: github.ref == 'refs/heads/main'
       - name: Install cargo-audit
+        if: github.ref == 'refs/heads/main'
         run: cargo install cargo-audit --locked
       - name: cargo audit
+        if: github.ref == 'refs/heads/main'
         run: cargo audit
         continue-on-error: true
