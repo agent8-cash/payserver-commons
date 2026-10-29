@@ -50,11 +50,11 @@ pub struct CreateApiKeyPayload {
     /// Optional expiration time.
     pub expires_at: Option<DateTime<Utc>>,
     /// Policy strings to scope the key to, or `["unrestricted"]` for the
-    /// owner's full role. Omitted or empty means the key can authenticate
-    /// but do nothing else, so a new key must be deliberately widened rather
-    /// than silently inheriting everything its owner can do.
-    #[serde(default)]
-    pub permissions: Vec<String>,
+    /// owner's full role. `None` (field omitted) means the key inherits the
+    /// owner's role in full — today's behaviour, so existing integrations
+    /// are unaffected. `Some(vec![])` is a deliberate key that authenticates
+    /// but can do nothing. `Some([..])` scopes the key to those policies.
+    pub permissions: Option<Vec<String>>,
 }
 
 /// Response after creating an API key (includes plaintext key).
@@ -102,13 +102,48 @@ mod tests {
     use super::*;
 
     /// A create request that omits `permissions` entirely must deserialize
-    /// to an empty scope, not to `["unrestricted"]` or any other default
-    /// that would grant more than the caller asked for.
+    /// to `None`, not to `Some(vec![])`: the two are distinct contracts
+    /// (inherit the owner's role in full vs. a deliberately powerless key).
     #[test]
-    fn omitted_permissions_on_create_defaults_to_empty() {
+    fn omitted_permissions_on_create_is_none() {
         let payload: CreateApiKeyPayload =
             serde_json::from_str(r#"{"name": "test key", "expires_at": null}"#).unwrap();
-        assert_eq!(payload.permissions, Vec::<String>::new());
+        assert_eq!(payload.permissions, None);
+    }
+
+    /// An explicit empty array is a deliberate "can do nothing" key, and
+    /// must not be conflated with the omitted-field case above.
+    #[test]
+    fn empty_permissions_on_create_is_some_empty() {
+        let payload: CreateApiKeyPayload =
+            serde_json::from_str(r#"{"name": "test key", "expires_at": null, "permissions": []}"#)
+                .unwrap();
+        assert_eq!(payload.permissions, Some(Vec::<String>::new()));
+    }
+
+    /// A non-empty array deserializes to the scoped policy list.
+    #[test]
+    fn scoped_permissions_on_create_is_some_with_values() {
+        let payload: CreateApiKeyPayload = serde_json::from_str(
+            r#"{"name": "test key", "expires_at": null, "permissions": ["x"]}"#,
+        )
+        .unwrap();
+        assert_eq!(payload.permissions, Some(vec!["x".to_string()]));
+    }
+
+    /// A `CreateApiKeyPayload` with `permissions: None` round-trips through
+    /// JSON as an explicit `null`, not as an omitted field (no
+    /// `skip_serializing_if` is applied), so callers scanning the raw JSON
+    /// see the key present.
+    #[test]
+    fn none_permissions_serializes_as_null() {
+        let payload = CreateApiKeyPayload {
+            name: "test key".to_string(),
+            expires_at: None,
+            permissions: None,
+        };
+        let json = serde_json::to_value(&payload).unwrap();
+        assert_eq!(json["permissions"], serde_json::Value::Null);
     }
 
     /// A stored key response with no `permissions` column value must
