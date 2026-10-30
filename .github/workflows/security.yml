@@ -1,0 +1,103 @@
+name: Security
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Audits this repo's own Cargo.lock, which is committed so the pinned
+      # versions are what get checked. Vulnerabilities fail the job;
+      # unmaintained-crate warnings are printed but do not.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+
+      - name: cargo audit
+        run: cargo audit
+
+  secrets:
+    name: secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # gitleaks is pinned and its tarball is checked against a sha256 before
+      # it runs.
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          V=8.30.1
+          curl -fsSLo gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum -c -
+          tar xzf gitleaks.tar.gz gitleaks
+          sudo install gitleaks /usr/local/bin/gitleaks
+
+      # Scans only the commits this PR adds, so existing history cannot turn
+      # an unrelated PR red.
+      - name: Scan PR commits
+        env:
+          RANGE: ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+        run: gitleaks git --redact --no-banner --log-opts="$RANGE"
+
+  sensitive-paths:
+    name: sensitive-path flag
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find sensitive paths
+        id: scan
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          scripts/sensitive-paths.sh "$BASE" "$HEAD" > sensitive.txt
+          if [ -s sensitive.txt ]; then
+            echo "flagged=true" >> "$GITHUB_OUTPUT"
+            while read -r f; do echo "::warning file=$f::sensitive path, needs human review"; done < sensitive.txt
+          else
+            echo "flagged=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Labels and comments need a write token, which fork PRs do not get.
+      # Fork PRs still get the warning annotations above.
+      - name: Label and comment
+        if: steps.scan.outputs.flagged == 'true' && github.event.pull_request.head.repo.full_name == github.repository
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const number = context.payload.pull_request.number;
+            const files = fs.readFileSync('sensitive.txt', 'utf8').trim().split('\n');
+            const marker = '<!-- sensitive-paths -->';
+            const body = `${marker}\n**Sensitive paths changed.** A human must review these before merge (crypto, auth, scrub rules, key derivation):\n\n${files.map(f => `- \`${f}\``).join('\n')}`;
+            try {
+              await github.rest.issues.createLabel({ owner, repo, name: 'security-review', color: 'd93f0b' });
+            } catch (e) {
+              if (e.status !== 422) throw e;
+            }
+            await github.rest.issues.addLabels({ owner, repo, issue_number: number, labels: ['security-review'] });
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: number });
+            const mine = comments.find(c => c.body && c.body.includes(marker));
+            if (mine) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: mine.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: number, body });
+            }
