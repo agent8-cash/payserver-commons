@@ -7,21 +7,21 @@
 #   is a form GitHub rejects. The two files cannot be the same bytes.
 #
 #   `runs-on: rcs-docker` names this forge's container runner. `ubuntu-latest` is
-#   served here too, mapped to docker://node:22-bookworm, but every other port in
-#   the fleet names rcs-docker and one spelling is easier to reason about than two.
+#   served here too, mapped to docker://node:22-bookworm, but every other port
+#   to this forge names rcs-docker and one spelling is easier to reason about
+#   than two.
 #
 # NOTHING IS DROPPED. Both jobs are ported: neither declares a service container
 # and neither uploads artifacts, which are the two platform gaps that cost
-# ethpayserver its `Test` and `E2E` jobs and payserver-billing three of six.
+# ethpayserver and payserver-billing some of their own jobs when porting those.
 # commons is pure Rust with no fixtures, so it ports whole.
 #
 # THE POINT OF THE DIRECTORY, beyond running CI here: Forgejo reads
 # .github/workflows only as a FALLBACK, when .forgejo/workflows is absent. With
 # no directory here this repository's GitHub workflows were live on this forge
-# naming `ubuntu-latest`, which nothing served until today - so runs queued and
-# were evicted by the next push. Measured across the fleet 2026-10-20:
-# ethpayserver 899 runs, 893 cancelled, zero successes. This directory is what
-# takes that fallback away.
+# naming `ubuntu-latest`, which nothing served - so runs queued and were
+# evicted by the next push, with zero successes. This directory is what takes
+# that fallback away.
 name: CI
 
 on:
@@ -133,7 +133,7 @@ jobs:
   # With `if:` at JOB level and the condition false, this forge leaves the job's
   # commit status at `pending / Has started running` and never resolves it.
   # Measured on this PR: the RUN finished `success` while the Audit status stayed
-  # pending indefinitely - and merge-pr.sh correctly refuses a queued check,
+  # pending indefinitely - and a merge gate correctly refuses a queued check,
   # because a queued job is could-not-run and never a pass. So every pull request
   # here would have been blocked for ever by a job that was supposed to skip.
   #
