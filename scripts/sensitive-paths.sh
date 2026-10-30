@@ -10,5 +10,5 @@ base="${1:?usage: sensitive-paths.sh <base-sha> <head-sha>}"
 head="${2:?usage: sensitive-paths.sh <base-sha> <head-sha>}"
 
 git diff --name-only "$base...$head" \
-  | grep -E '^(crypto|auth|scrub)/|(^|/)auth/|(^|/)[^/]*(kdf|derive|argon)[^/]*$' \
+  | grep -E '(^|/)(crypto|auth|scrub)(/|$)|(kdf|deriv|argon)' \
   || true
