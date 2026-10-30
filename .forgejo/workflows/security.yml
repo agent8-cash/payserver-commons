@@ -66,6 +66,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Sensitive-path matcher tests
+        run: ./scripts/test-sensitive-paths.sh
+
       - name: Find sensitive paths
         id: scan
         env:
