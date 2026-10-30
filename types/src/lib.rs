@@ -1,13 +1,12 @@
-//! Common types and traits for the PayServer ecosystem.
+//! Common types shared across PayServer implementations.
 //!
-//! This crate provides the foundation for building payment servers that support
-//! various blockchain networks. Each PayServer implementation (ethpayserver,
-//! bitcoinpayserver, etc.) uses these common types and implements the core traits.
+//! This crate provides data types used by payment servers that support
+//! various blockchain networks (ethpayserver, and any future payserver on
+//! another chain family).
 //!
 //! # Architecture
 //!
 //! - `ChainId`: CAIP-2 identifier for any chain, in any family
-//! - `PayServer` trait: Core interface all payment servers implement
 //! - `InvoiceData`, `PaymentData`: Generic data structures for invoices and payments
 //! - Repository traits: `InvoiceRepository`, `PaymentRepository`, `WatchedAddressRepository`
 //! - `Store`, `StoreRole`, `UserStore`: Multi-tenant store management
@@ -95,10 +94,7 @@ pub use repositories::{
     WebhookDeliveryWriter,
 };
 pub use store::{Store, StoreId, StoreInfo};
-pub use traits::{
-    CreateInvoiceRequest, InvoiceData, InvoiceQuery, PayServer, PaymentData, PaymentEventPublisher,
-    PaymentEventSubscriber, PaymentMonitor,
-};
+pub use traits::{InvoiceData, InvoiceQuery, PaymentData};
 pub use types::{
     AssetType, ChainId, ChainIdError, CleanupAddressInfo, DerivationAllocation, HealthStatus,
     InvoiceId, InvoiceStatus, NAMESPACE_BIP122, NAMESPACE_EIP155, NAMESPACE_MONERO,

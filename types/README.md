@@ -4,12 +4,12 @@ Common types and traits for the PayServer ecosystem.
 
 ## Purpose
 
-This crate provides the foundation shared across all PayServer implementations (ethpayserver and any future payserver on another chain family). It defines:
+This crate provides data types shared across PayServer implementations
+(ethpayserver and any future payserver on another chain family). It defines:
 
 - **ChainId** - CAIP-2 chain identity (`eip155:1`, `tron:728126428`, ...), open by
   construction so a chain can be added without touching this crate — see
   `types::ChainId` below
-- **PayServer trait** - Core interface all payment servers implement
 - **Data types** - `InvoiceData`, `PaymentData`, `TokenData`
 - **Repository traits** - Database abstraction layer (around twenty traits;
   `InvoiceRepository`, `PaymentRepository` and `TokenRepository` are three of them)
@@ -20,7 +20,7 @@ This crate provides the foundation shared across all PayServer implementations (
 |--------|-------------|
 | `types` | Core types: `ChainId`, `InvoiceId`, `InvoiceStatus`, `PaymentEvent`, `UserId` |
 | `store` | Multi-tenant types: `Store`, `StoreId`, `StoreInfo` |
-| `traits` | `PayServer` trait, `InvoiceData`, `PaymentData`, `CreateInvoiceRequest` |
+| `traits` | `InvoiceData`, `PaymentData`, `InvoiceQuery` |
 | `repositories` | Database traits — see `src/repositories/` for the full list |
 | `currency` | Currency/amount handling |
 | `error` | `PayServerError` and `PayServerResult` |
