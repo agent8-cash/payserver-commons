@@ -3,6 +3,7 @@ members = [
     "api-types",
     "auth",
     "crypto",
+    "payserver-chain-proto",
     "payserver-plugin-api",
     "payserver-plugin-host",
     "rates",

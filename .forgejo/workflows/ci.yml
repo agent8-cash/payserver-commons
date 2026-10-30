@@ -1,0 +1,161 @@
+# THE FORGEJO COPY of .github/workflows/ci.yml. A COPY AND NOT A MOVE, for two
+# reasons that are both one-way:
+#
+#   `uses:` carries a FULL URL for any action not published on code.forgejo.org.
+#   Forgejo resolves a bare `owner/action` against its own registry, so
+#   `dtolnay/rust-toolchain@stable` would not resolve here - and the full-URL form
+#   is a form GitHub rejects. The two files cannot be the same bytes.
+#
+#   `runs-on: rcs-docker` names this forge's container runner. `ubuntu-latest` is
+#   served here too, mapped to docker://node:22-bookworm, but every other port
+#   to this forge names rcs-docker and one spelling is easier to reason about
+#   than two.
+#
+# NOTHING IS DROPPED. Both jobs are ported: neither declares a service container
+# and neither uploads artifacts, which are the two platform gaps that cost
+# ethpayserver and payserver-billing some of their own jobs when porting those.
+# commons is pure Rust with no fixtures, so it ports whole.
+#
+# THE POINT OF THE DIRECTORY, beyond running CI here: Forgejo reads
+# .github/workflows only as a FALLBACK, when .forgejo/workflows is absent. With
+# no directory here this repository's GitHub workflows were live on this forge
+# naming `ubuntu-latest`, which nothing served - so runs queued and were
+# evicted by the next push, with zero successes. This directory is what takes
+# that fallback away.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-C link-arg=-fuse-ld=mold"
+
+jobs:
+  verify:
+    name: Verify
+    runs-on: rcs-docker
+    steps:
+      - uses: actions/checkout@v4
+
+      # This repository is public. A ticket id in a source file leaks the
+      # title and shape of unreleased work, and an outside reader cannot open
+      # the tracker anyway. Ticket ids belong in the commit message and PR
+      # title, not the tree - see CLAUDE.md.
+      - name: No ticket ids or tracker links in source
+        run: ./scripts/check-no-ticket-refs.sh
+
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: https://github.com/Swatinem/rust-cache@v2
+
+      - name: Install mold + nextest
+        run: |
+          sudo apt-get update && sudo apt-get install -y mold
+          curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ${CARGO_HOME:-~/.cargo}/bin
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      # --all-features is the point of this step. ui-kit's `auth` feature is
+      # optional, so a default build never compiles ui-kit/src/auth - login,
+      # registration, recovery. That module was therefore never linted at all
+      # and had accumulated 83 findings; three E0425s once reached a green PR
+      # (2026-09-06), and a dead binding shipped green in #15. Both were
+      # invisible to a clippy step that did not build the code.
+      #
+      # The backlog is cleared - 78 auto-fixed, 5 redundant locals by hand - so
+      # this is one step that denies rustc AND clippy warnings across every
+      # feature, instead of a lenient `check` beside a clippy run that skipped
+      # half the crate.
+      - name: Clippy (all features)
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+      # --all-features here for the same reason as the clippy step above:
+      # without it `cargo nextest run` never
+      # builds ui-kit's `auth` module, so the registration-derivation tests in
+      # register_page.rs would sit in the tree reading as coverage and never
+      # execute. A test CI does not run is worse than a known gap.
+      #
+      # This makes the suite noticeably slower: the recovery round trips run
+      # Argon2id at 64 MiB / t=3 unoptimised, twice per test. That cost is the
+      # security property - do not lower the parameters to speed it up.
+      #
+      # No --lib: it restricts the run to library unit tests, which left
+      # rates/tests/integration.rs - the wiremock tests for exchange-rate
+      # parsing, inverted pairs and failover, i.e. the code that prices every
+      # invoice - compiled by clippy and never executed.
+      #
+      # Logged to nextest.log (ANSI stripped) because the guard step below
+      # reads this one run instead of invoking nextest again: an earlier
+      # version re-ran `cargo nextest run -p rates --test integration` just to
+      # count it, compiling and executing the same 12-test wiremock suite a
+      # second time for one number already present in this run's output.
+      - name: Tests (all features)
+        run: |
+          set -o pipefail
+          cargo nextest run --workspace --all-features --no-fail-fast 2>&1 \
+            | sed -r 's/\x1b\[[0-9;]*m//g' | tee nextest.log
+
+      # A binary that compiles and runs zero tests reports success, so assert
+      # the count of the rates integration target rather than trust a green
+      # run. Bump EXPECTED when a test is added to or removed from
+      # rates/tests/integration.rs. Reads nextest.log from the step above
+      # instead of re-running nextest - see the comment there.
+      #
+      # Tightened: the previous pattern ("N tests run: N passed") matched as
+      # an unanchored substring, so "12 tests run: 12 passed, 1 skipped" from
+      # a stray #[ignore] on a 13th test matched it too - the trailing
+      # ", 1 skipped" was never inspected and the guard passed silently.
+      # Requiring an explicit ", 0 skipped" at end of line closes that, and
+      # catches a skip anywhere in the workspace, not only in rates.
+      - name: Rates integration tests ran (count)
+        env:
+          EXPECTED: 12
+        run: |
+          set -o pipefail
+          count="$(grep -c ' rates::integration ' nextest.log)"
+          if [ "$count" -ne "${EXPECTED}" ]; then
+            echo "::error::expected ${EXPECTED} rates::integration tests to run, saw ${count}" >&2
+            exit 1
+          fi
+          grep -E '^ *Summary \[.*\] [0-9]+ tests? run: [0-9]+ passed, 0 skipped$' nextest.log
+
+  # THE CONDITION IS ON THE STEPS, NOT THE JOB, and that is a Forgejo
+  # difference rather than a style choice.
+  #
+  # With `if:` at JOB level and the condition false, this forge leaves the job's
+  # commit status at `pending / Has started running` and never resolves it.
+  # Measured on this PR: the RUN finished `success` while the Audit status stayed
+  # pending indefinitely - and a merge gate correctly refuses a queued check,
+  # because a queued job is could-not-run and never a pass. So every pull request
+  # here would have been blocked for ever by a job that was supposed to skip.
+  #
+  # (A job skipped because of `needs:` DOES resolve - ethpayserver's Audit reports
+  # `success / Has been skipped` that way. It is the job-level `if` that hangs.)
+  #
+  # With the condition on each step, the job starts, its status resolves, and it
+  # does nothing off main at the cost of one container start.
+  audit:
+    name: Audit
+    runs-on: rcs-docker
+    env:
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+        if: github.ref == 'refs/heads/main'
+      - uses: https://github.com/dtolnay/rust-toolchain@stable
+        if: github.ref == 'refs/heads/main'
+      - name: Install cargo-audit
+        if: github.ref == 'refs/heads/main'
+        run: cargo install cargo-audit --locked
+      - name: cargo audit
+        if: github.ref == 'refs/heads/main'
+        run: cargo audit
+        continue-on-error: true

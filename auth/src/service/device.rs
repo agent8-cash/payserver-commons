@@ -1,7 +1,7 @@
 //! Device management methods.
 
 use crate::error::{AuthError, Result};
-use crate::models::{Device, DeviceId, DeviceInfo, SessionId, UserId};
+use crate::models::{Device, DeviceId, DeviceInfo, DeviceType, SessionId, UserId};
 use crate::repository::{
     ChallengeRepository, DeviceRepository, PasskeyRepository, SessionRepository, UserRepository,
     WalletRepository,
@@ -101,5 +101,71 @@ where
                 Ok(None)
             }
         }
+    }
+
+    /// Pick the device a login with no reusable device attaches its session to.
+    ///
+    /// Below the cap this registers a new device. At the cap it re-uses the
+    /// least-recently-used active device instead of refusing: the credential has
+    /// already been verified, and the only remedy for a full account (revoking a
+    /// device) needs a session, which needs a login. Refusing here made the cap a
+    /// permanent lockout. Re-using keeps the number of stored device records
+    /// bounded, which is what the cap is for.
+    ///
+    /// The reclaimed record takes the new name and type, so the device list shows
+    /// what last used it.
+    pub(crate) async fn device_for_new_login(
+        &self,
+        user: &crate::models::User,
+        name: String,
+        device_type: DeviceType,
+    ) -> Result<DeviceId> {
+        let active_count = self.repo.count_active_devices(user.id).await?;
+
+        if active_count >= self.config.max_devices_per_user {
+            let lru = self
+                .repo
+                .get_devices_for_user(user.id)
+                .await?
+                .into_iter()
+                .filter(|d| d.is_active)
+                .min_by_key(|d| d.last_used_at.unwrap_or(d.created_at));
+
+            if let Some(mut device) = lru {
+                // A warning, and carrying the account: the device list is the only
+                // place a user could notice a machine that is not theirs, and an
+                // attach to a full account no longer adds a row there. Ids only -
+                // never the key blob or a session token.
+                tracing::warn!(
+                    user_id = %user.id,
+                    device_id = %device.id,
+                    "device cap reached on login; re-using least recently used device"
+                );
+                device.name = name;
+                device.device_type = device_type;
+                device.encrypted_symmetric_key = user.encrypted_symmetric_key.clone();
+                device.kdf_params = user.kdf_params.clone();
+                device.last_used_at = Some(chrono::Utc::now());
+                let id = device.id;
+                self.repo.update_device(&device).await?;
+                return Ok(id);
+            }
+            // A cap of zero leaves nothing to re-use; that is a configuration
+            // that forbids devices, so it still refuses.
+            return Err(AuthError::MaxDevicesReached(
+                self.config.max_devices_per_user,
+            ));
+        }
+
+        let device = Device::new(
+            user.id,
+            name,
+            device_type,
+            user.encrypted_symmetric_key.clone(),
+            user.kdf_params.clone(),
+        );
+        let id = device.id;
+        self.repo.create_device(&device).await?;
+        Ok(id)
     }
 }

@@ -62,8 +62,46 @@ jobs:
       # This makes the suite noticeably slower: the recovery round trips run
       # Argon2id at 64 MiB / t=3 unoptimised, twice per test. That cost is the
       # security property - do not lower the parameters to speed it up.
+      #
+      # No --lib: it restricts the run to library unit tests, which left
+      # rates/tests/integration.rs - the wiremock tests for exchange-rate
+      # parsing, inverted pairs and failover, i.e. the code that prices every
+      # invoice - compiled by clippy and never executed.
+      #
+      # Logged to nextest.log (ANSI stripped) because the guard step below
+      # reads this one run instead of invoking nextest again: an earlier
+      # version re-ran `cargo nextest run -p rates --test integration` just to
+      # count it, compiling and executing the same 12-test wiremock suite a
+      # second time for one number already present in this run's output.
       - name: Tests (all features)
-        run: cargo nextest run --workspace --lib --all-features --no-fail-fast
+        run: |
+          set -o pipefail
+          cargo nextest run --workspace --all-features --no-fail-fast 2>&1 \
+            | sed -r 's/\x1b\[[0-9;]*m//g' | tee nextest.log
+
+      # A binary that compiles and runs zero tests reports success, so assert
+      # the count of the rates integration target rather than trust a green
+      # run. Bump EXPECTED when a test is added to or removed from
+      # rates/tests/integration.rs. Reads nextest.log from the step above
+      # instead of re-running nextest - see the comment there.
+      #
+      # Tightened: the previous pattern ("N tests run: N passed") matched as
+      # an unanchored substring, so "12 tests run: 12 passed, 1 skipped" from
+      # a stray #[ignore] on a 13th test matched it too - the trailing
+      # ", 1 skipped" was never inspected and the guard passed silently.
+      # Requiring an explicit ", 0 skipped" at end of line closes that, and
+      # catches a skip anywhere in the workspace, not only in rates.
+      - name: Rates integration tests ran (count)
+        env:
+          EXPECTED: 12
+        run: |
+          set -o pipefail
+          count="$(grep -c ' rates::integration ' nextest.log)"
+          if [ "$count" -ne "${EXPECTED}" ]; then
+            echo "::error::expected ${EXPECTED} rates::integration tests to run, saw ${count}" >&2
+            exit 1
+          fi
+          grep -E '^ *Summary \[.*\] [0-9]+ tests? run: [0-9]+ passed, 0 skipped$' nextest.log
 
   audit:
     name: Audit
