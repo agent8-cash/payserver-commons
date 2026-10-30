@@ -142,20 +142,3 @@ jobs:
   #
   # With the condition on each step, the job starts, its status resolves, and it
   # does nothing off main at the cost of one container start.
-  audit:
-    name: Audit
-    runs-on: rcs-docker
-    env:
-      RUSTFLAGS: ""
-    steps:
-      - uses: actions/checkout@v4
-        if: github.ref == 'refs/heads/main'
-      - uses: https://github.com/dtolnay/rust-toolchain@stable
-        if: github.ref == 'refs/heads/main'
-      - name: Install cargo-audit
-        if: github.ref == 'refs/heads/main'
-        run: cargo install cargo-audit --locked
-      - name: cargo audit
-        if: github.ref == 'refs/heads/main'
-        run: cargo audit
-        continue-on-error: true

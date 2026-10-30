@@ -1,0 +1,82 @@
+# THE FORGEJO COPY of .github/workflows/security.yml. Kept in step by hand,
+# same as ci.yml: this forge runs `rcs-docker`, and `uses:` needs a full URL
+# for actions not published on code.forgejo.org.
+#
+# Not ported: the PR label and comment. That step calls the GitHub API through
+# actions/github-script, which this forge does not serve. The ::warning::
+# annotations still print here, and the GitHub copy labels the PR.
+name: Security
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: rcs-docker
+    steps:
+      - uses: actions/checkout@v4
+
+      # Audits this repo's own Cargo.lock, which is committed so the pinned
+      # versions are what get checked. Vulnerabilities fail the job;
+      # unmaintained-crate warnings are printed but do not.
+      - uses: https://github.com/taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.2
+
+      - name: cargo audit
+        run: cargo audit
+
+  secrets:
+    name: secret scan
+    runs-on: rcs-docker
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # gitleaks is pinned and its tarball is checked against a sha256 before
+      # it runs.
+      - name: Install gitleaks
+        run: |
+          set -euo pipefail
+          V=8.30.1
+          curl -fsSLo gitleaks.tar.gz "https://github.com/gitleaks/gitleaks/releases/download/v${V}/gitleaks_${V}_linux_x64.tar.gz"
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  gitleaks.tar.gz" | sha256sum -c -
+          tar xzf gitleaks.tar.gz gitleaks
+          sudo install gitleaks /usr/local/bin/gitleaks
+
+      # Scans only the commits this PR adds, so existing history cannot turn
+      # an unrelated PR red.
+      - name: Scan PR commits
+        env:
+          RANGE: ${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}
+        run: gitleaks git --redact --no-banner --log-opts="$RANGE"
+
+  sensitive-paths:
+    name: sensitive-path flag
+    runs-on: rcs-docker
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Find sensitive paths
+        id: scan
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          scripts/sensitive-paths.sh "$BASE" "$HEAD" > sensitive.txt
+          if [ -s sensitive.txt ]; then
+            echo "flagged=true" >> "$GITHUB_OUTPUT"
+            while read -r f; do echo "::warning file=$f::sensitive path, needs human review"; done < sensitive.txt
+          else
+            echo "flagged=false" >> "$GITHUB_OUTPUT"
+          fi
