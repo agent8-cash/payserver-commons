@@ -243,6 +243,19 @@ impl PluginHost {
         }
     }
 
+    /// Sets per-id minimum plugin versions, enforced by
+    /// [`register`](Self::register). Ids not listed have no floor.
+    #[must_use]
+    pub fn with_minimum_versions(mut self, min_versions: HashMap<PluginId, Version>) -> Self {
+        self.registry = RwLock::new(
+            self.registry
+                .into_inner()
+                .unwrap_or_else(PoisonError::into_inner)
+                .with_minimum_versions(min_versions),
+        );
+        self
+    }
+
     /// Compiles and instantiates `wasm` — once; the resulting instance is
     /// kept and reused across every future call — before touching the
     /// registry at all, so a plugin id is only ever claimed once both have
@@ -1027,6 +1040,27 @@ mod admin_toggle_tests {
         host.register(manifest_for(id.as_str()), &echo_module())
             .unwrap();
         host
+    }
+
+    /// A floor configured on `PluginHost` itself reaches the registry gate:
+    /// a plugin below it is refused before any instance is built.
+    #[test]
+    fn a_configured_minimum_version_refuses_a_plugin_below_it() {
+        let id = PluginId::new("cash.random.billing").unwrap();
+        let floors = HashMap::from([(
+            id.clone(),
+            payserver_plugin_api::Version::parse("0.2.0").unwrap(),
+        )]);
+        let host = PluginHost::new(host_version(), 3, Duration::from_secs(2))
+            .with_minimum_versions(floors);
+
+        let err = host
+            .register(manifest_for(id.as_str()), &echo_module())
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            PluginHostError::Rejected(PluginLoadError::BelowMinimumVersion { .. })
+        ));
     }
 
     /// An admin disabling a plugin means stop running it, now.
