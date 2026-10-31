@@ -145,7 +145,8 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::mpsc::{self, RecvTimeoutError};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -167,19 +168,14 @@ pub const HOST_MODULE: &str = "ethpayserver";
 /// an argument. A plugin naming the schema it wants to read is the same hole
 /// `enforce_own_store` closes on the invoice side.
 ///
-/// # An implementation must bound its own time
+/// # The host bounds every call to this trait by wall clock
 ///
-/// The call deadline does **not** cover this. A plugin's deadline is enforced
-/// by wasmtime's epoch interruption, which traps *wasm execution* — and a
-/// host function is not wasm execution. Once control is inside an
-/// implementation of this trait, the epoch can advance as far as it likes and
-/// nothing interrupts it; the plugin is simply not running to be trapped.
-///
-/// So an implementation that talks to a database and hangs holds its
-/// `spawn_blocking` thread indefinitely, past any deadline the host thinks it
-/// set, and the plugin looks stuck for a reason that is not the plugin's. Any
-/// implementation that can block must impose its own timeout and return an
-/// error when it elapses.
+/// Each method runs on its own thread and the plugin's wasm waits for it no
+/// longer than the call's remaining deadline. When that elapses the plugin
+/// gets an error, the whole plugin call fails, and the implementation's thread
+/// is abandoned, not cancelled: it keeps running and its side effect may still
+/// land. Implementations should still bound their own time (a database
+/// statement timeout, say) so abandoned threads finish instead of piling up.
 ///
 /// # Where the real implementation lives
 ///
@@ -297,6 +293,12 @@ struct PluginCtx {
     /// protocol is strictly query-then-take, so a second pending answer would
     /// mean a plugin ignored the first.
     pending: Vec<u8>,
+    /// Wall-clock instant after which the current call has no time left.
+    host_deadline: Instant,
+    /// Set when a host call could not complete within the call's wall-clock
+    /// budget (or panicked). Fails the whole plugin call, even if the plugin
+    /// recovers from the error and answers normally.
+    host_fault: Option<String>,
 }
 
 /// A host call that could not run. Negative so it cannot be confused with a
@@ -382,7 +384,7 @@ impl PluginEngine {
     /// Instantiates `module`, once, keeping the resulting store and export
     /// handles for reuse across calls.
     pub fn instantiate(&self, module: &Module) -> Result<PluginInstance, PluginWasmError> {
-        PluginInstance::new(&self.engine, module, None)
+        PluginInstance::new(&self.engine, module, None, self.tick)
     }
 
     /// Instantiates `module` with `calls` available to it as host imports.
@@ -391,7 +393,7 @@ impl PluginEngine {
         module: &Module,
         calls: Arc<dyn PluginHostCalls>,
     ) -> Result<PluginInstance, PluginWasmError> {
-        PluginInstance::new(&self.engine, module, Some(calls))
+        PluginInstance::new(&self.engine, module, Some(calls), self.tick)
     }
 
     /// How often the epoch advances: the resolution of every tick-counted
@@ -428,6 +430,8 @@ pub struct PluginInstance {
     instance: Instance,
     memory: Memory,
     alloc: Alloc,
+    /// The engine's epoch resolution, to turn a tick budget into wall time.
+    tick: Duration,
 }
 
 impl PluginInstance {
@@ -435,12 +439,15 @@ impl PluginInstance {
         engine: &Engine,
         module: &Module,
         calls: Option<Arc<dyn PluginHostCalls>>,
+        tick: Duration,
     ) -> Result<Self, PluginWasmError> {
         let mut store = Store::new(
             engine,
             PluginCtx {
                 calls,
                 pending: Vec::new(),
+                host_deadline: Instant::now(),
+                host_fault: None,
             },
         );
         let linker = host_linker(engine)?;
@@ -458,6 +465,7 @@ impl PluginInstance {
             instance,
             memory,
             alloc,
+            tick,
         })
     }
 
@@ -475,6 +483,14 @@ impl PluginInstance {
         deadline_ticks: u64,
     ) -> Result<Vec<u8>, PluginCallError> {
         self.store.set_epoch_deadline(deadline_ticks);
+        // Host calls get the same deadline in wall time: the epoch does not
+        // run while a host call blocks, so each one is bounded by what is left.
+        let budget = self
+            .tick
+            .saturating_mul(u32::try_from(deadline_ticks).unwrap_or(u32::MAX));
+        let ctx = self.store.data_mut();
+        ctx.host_deadline = Instant::now() + budget;
+        ctx.host_fault = None;
 
         let len = i32::try_from(arg_json.len())
             .map_err(|_| PluginCallError::Other("argument too large for a wasm32 plugin".into()))?;
@@ -487,7 +503,13 @@ impl PluginInstance {
             .instance
             .get_typed_func(&mut self.store, export)
             .map_err(|_| PluginCallError::MissingExport(export.to_string()))?;
-        let packed = call.call(&mut self.store, (ptr, len)).map_err(classify)?;
+        let outcome = call.call(&mut self.store, (ptr, len));
+        // A host fault is the root cause even when the plugin then traps or
+        // answers normally, so it wins over whatever the guest returned.
+        if let Some(fault) = self.store.data_mut().host_fault.take() {
+            return Err(PluginCallError::Other(fault));
+        }
+        let packed = outcome.map_err(classify)?;
 
         let (out_ptr, out_len) = unpack(packed);
         if out_len == 0 {
@@ -568,14 +590,23 @@ fn define_answering_call(
                     return HOST_CALL_FAILED;
                 };
 
-                match run(calls.as_ref(), &request) {
-                    Ok(answer) => {
+                let budget = caller
+                    .data()
+                    .host_deadline
+                    .saturating_duration_since(Instant::now());
+                match run_bounded(calls, run, name, request, budget) {
+                    HostOutcome::Answered(Ok(answer)) => {
                         let len = i64::try_from(answer.len()).unwrap_or(i64::MAX);
                         caller.data_mut().pending = answer;
                         len
                     }
-                    Err(message) => {
+                    HostOutcome::Answered(Err(message)) => {
                         caller.data_mut().pending = message.into_bytes();
+                        HOST_CALL_FAILED
+                    }
+                    HostOutcome::Fault(message) => {
+                        caller.data_mut().pending = message.clone().into_bytes();
+                        caller.data_mut().host_fault = Some(message);
                         HOST_CALL_FAILED
                     }
                 }
@@ -583,6 +614,65 @@ fn define_answering_call(
         )
         .map(|_| ())
         .map_err(|e| PluginWasmError::Instantiate(e.to_string()))
+}
+
+/// How one host call ended, from the plugin's side.
+enum HostOutcome {
+    /// The implementation answered, or refused with a message the plugin may
+    /// handle.
+    Answered(Result<Vec<u8>, String>),
+    /// The call did not complete within the plugin's remaining wall-clock
+    /// budget, panicked, or never started. The plugin call fails.
+    Fault(String),
+}
+
+/// Runs one host call on its own thread and waits for it no longer than
+/// `budget`.
+///
+/// The epoch deadline does not run while a host call blocks, so without this
+/// a plugin could hold its instance (and its caller) for as long as the
+/// implementation hangs. On timeout the thread is abandoned, not cancelled: a
+/// sync call cannot be interrupted from outside, so its effect may still land
+/// after the caller was told it failed. That is surfaced in the failure
+/// message and the log, not hidden.
+fn run_bounded(
+    calls: Arc<dyn PluginHostCalls>,
+    run: HostCall,
+    name: &'static str,
+    request: Vec<u8>,
+    budget: Duration,
+) -> HostOutcome {
+    // Past the deadline already: starting the call would run a side effect
+    // for a caller that has given up, so refuse it.
+    if budget.is_zero() {
+        return HostOutcome::Fault(format!(
+            "host call {name} not started: the plugin's wall-clock deadline had already passed"
+        ));
+    }
+    let (tx, rx) = mpsc::sync_channel(1);
+    let spawned = std::thread::Builder::new().spawn(move || {
+        let _ = tx.send(run(calls.as_ref(), &request));
+    });
+    if spawned.is_err() {
+        return HostOutcome::Fault(format!("host call {name} could not start a thread"));
+    }
+    match rx.recv_timeout(budget) {
+        Ok(result) => HostOutcome::Answered(result),
+        Err(RecvTimeoutError::Timeout) => {
+            tracing::error!(
+                host_call = name,
+                "plugin host call outlived the plugin's wall-clock deadline; abandoned, not cancelled, so its effect may still land"
+            );
+            HostOutcome::Fault(format!(
+                "host call {name} did not finish within the plugin's wall-clock deadline; it was abandoned and its effect may still land"
+            ))
+        }
+        // The sender is dropped without sending only if the implementation
+        // panicked, which must fail the call rather than look like an answer.
+        Err(RecvTimeoutError::Disconnected) => {
+            HostOutcome::Fault(format!("host call {name} panicked"))
+        }
+    }
 }
 
 /// Builds the import surface every plugin is instantiated against.

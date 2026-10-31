@@ -592,19 +592,15 @@ fn wall_clock_reason(deadline: Duration) -> String {
 /// bound on what the caller waits.
 ///
 /// It does **not** cancel the blocking thread: a thread inside a host call
-/// cannot be interrupted from outside. What happens to it is bounded
-/// separately. It cannot start late (see [`locked_call`]: waiting for the
-/// lock gives up at the deadline) and when its host call finally returns the
-/// epoch has long since passed the call's deadline, so the next epoch check
-/// (function entry or loop back-edge, not every instruction) traps; a plugin
-/// that returns straight after the host call simply completes. Either way
-/// the instance lock is released. Until the host call returns the lock stays
-/// held, which is why host-call implementations must bound their own time
-/// (see [`PluginHostCalls`](super::runtime::PluginHostCalls)) - a sync call
-/// cannot be cancelled from here - and why the host call's effect may still
-/// land after the caller was told the deadline passed: a timeout is not
-/// proof the effect did not happen. The warning logged for the call is what
-/// makes that contention visible.
+/// cannot be interrupted from outside, so it is abandoned, not cancelled. It
+/// cannot start late (see [`locked_call`]: waiting for the lock gives up at
+/// the deadline), and each host call inside it is bounded by the wall-clock
+/// time the plugin call has left (see `runtime::run_bounded`). When one
+/// overruns, the plugin call fails and the instance lock is released at that
+/// point, not when the abandoned host call returns. The host call's effect may
+/// still land after the caller was told the deadline passed: a timeout is not
+/// proof the effect did not happen. The failure reason and the error log name
+/// the host call for that reason.
 async fn bounded_call<T, F>(bound: Duration, call: F) -> CallEnd<T>
 where
     T: Send + 'static,
@@ -1001,6 +997,7 @@ mod tests {
 mod admin_toggle_tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use std::sync::atomic::AtomicBool;
     use std::time::Duration;
 
     use super::super::registry::host_version;
@@ -1188,16 +1185,28 @@ mod admin_toggle_tests {
         );
     }
 
-    /// A host-call double whose storage query sleeps: the plugin is not
-    /// executing wasm while it does, so no epoch tick counts the time.
-    struct SlowStorage(Duration);
-    impl PluginHostCalls for SlowStorage {
-        fn storage_query(&self, _request: &[u8]) -> Result<Vec<u8>, String> {
-            std::thread::sleep(self.0);
+    /// A host-call double whose storage query and invoice create sleep: the
+    /// plugin is not executing wasm while they do, so no epoch tick counts the
+    /// time. `landed` records whether the call ran to completion, which shows
+    /// an abandoned call is still running (not cancelled) after the caller has
+    /// been told it failed.
+    struct SlowCalls {
+        block: Duration,
+        landed: Arc<AtomicBool>,
+    }
+    impl SlowCalls {
+        fn finish(&self) -> Result<Vec<u8>, String> {
+            std::thread::sleep(self.block);
+            self.landed.store(true, Ordering::SeqCst);
             Ok(br#"{"ok":true}"#.to_vec())
         }
+    }
+    impl PluginHostCalls for SlowCalls {
+        fn storage_query(&self, _request: &[u8]) -> Result<Vec<u8>, String> {
+            self.finish()
+        }
         fn invoice_create(&self, _: &[u8]) -> Result<Vec<u8>, String> {
-            Err("unused".to_string())
+            self.finish()
         }
         fn merchant_volume(&self, _: &[u8]) -> Result<Vec<u8>, String> {
             Err("unused".to_string())
@@ -1213,7 +1222,12 @@ mod admin_toggle_tests {
         }
     }
 
-    fn host_with_slow_storage(block: Duration) -> (Arc<PluginHost>, PluginId) {
+    fn host_with_slow_calls(
+        block: Duration,
+        module: &[u8],
+        id: &str,
+    ) -> (Arc<PluginHost>, PluginId, Arc<AtomicBool>) {
+        let landed = Arc::new(AtomicBool::new(false));
         let host = Arc::new(PluginHost::with_tick(
             host_version(),
             100,
@@ -1225,12 +1239,24 @@ mod admin_toggle_tests {
             Duration::from_millis(25),
         ));
         host.register_with_calls(
-            manifest_for("cash.random.slowstore"),
-            &crate::runtime::fixtures::host_calling_module(),
-            Some(Arc::new(SlowStorage(block))),
+            manifest_for(id),
+            module,
+            Some(Arc::new(SlowCalls {
+                block,
+                landed: landed.clone(),
+            })),
         )
         .unwrap();
-        (host, PluginId::new("cash.random.slowstore").unwrap())
+        (host, PluginId::new(id).unwrap(), landed)
+    }
+
+    fn host_with_slow_storage(block: Duration) -> (Arc<PluginHost>, PluginId) {
+        let (host, id, _) = host_with_slow_calls(
+            block,
+            &crate::runtime::fixtures::host_calling_module(),
+            "cash.random.slowstore",
+        );
+        (host, id)
     }
 
     /// A plugin blocked inside a host call, not computing, must fail the
@@ -1254,13 +1280,40 @@ mod admin_toggle_tests {
         assert_eq!(host.status(&id).unwrap().consecutive_failures, 1);
     }
 
-    /// The blocked thread is abandoned, not cancelled: it still holds the
-    /// instance until the host call returns, a caller queued behind it gives
-    /// up at the deadline rather than waiting out the holder, and once the
-    /// host call returns the instance is released so the plugin is usable
-    /// again.
+    /// A host call that outlives the deadline must not keep the instance: the
+    /// plugin call fails at the deadline and the lock is released while the
+    /// abandoned host call is still running. The call is abandoned, not
+    /// cancelled, so it lands later; `landed` proves it kept running.
     #[tokio::test]
-    async fn lock_wait_is_bounded_and_the_instance_recovers_after_the_blocked_call() {
+    async fn an_overrunning_host_call_releases_the_instance_at_the_deadline() {
+        let (host, id, landed) = host_with_slow_calls(
+            Duration::from_millis(600),
+            &crate::runtime::fixtures::host_calling_module(),
+            "cash.random.slowstore",
+        );
+
+        let started = Instant::now();
+        let result = host
+            .run_query::<_, serde_json::Value>(&id, "call", &serde_json::json!({}))
+            .await;
+        assert!(started.elapsed() < Duration::from_millis(300));
+        assert!(result.unwrap_err().contains("wall-clock"));
+
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            host.instance_is_free(&id),
+            "the abandoned host call still holds the instance"
+        );
+        assert!(
+            !landed.load(Ordering::SeqCst),
+            "the host call should still be running, not cancelled or finished"
+        );
+    }
+
+    /// A caller queued behind an overrunning call is bounded by the deadline
+    /// too, whichever way it ends: busy, or its own bounded call.
+    #[tokio::test]
+    async fn a_caller_queued_behind_a_blocked_host_call_is_bounded() {
         let (host, id) = host_with_slow_storage(Duration::from_millis(300));
 
         let holder = {
@@ -1276,23 +1329,81 @@ mod admin_toggle_tests {
         let queued = host
             .run_query::<_, serde_json::Value>(&id, "call", &serde_json::json!({}))
             .await;
-        assert!(started.elapsed() < Duration::from_millis(200));
-        let queued_reason = queued.unwrap_err();
         assert!(
-            queued_reason.contains("waiting for the plugin's instance"),
-            "the queued caller should give up as busy, not on the outer bound: {queued_reason}"
+            started.elapsed() < Duration::from_millis(200),
+            "queued caller waited {:?}",
+            started.elapsed()
         );
+        assert!(queued.is_err());
         assert!(holder.await.unwrap().unwrap_err().contains("wall-clock"));
-        // Only the call that held the instance counts against the plugin;
-        // queueing behind it must not push a healthy plugin to disablement.
-        assert_eq!(host.status(&id).unwrap().consecutive_failures, 1);
+    }
 
-        // Let the abandoned host call return and release the lock.
-        tokio::time::sleep(Duration::from_millis(400)).await;
+    /// A host implementation that panics must fail the plugin call, not look
+    /// like a normal answer the plugin could mistake for success.
+    #[tokio::test]
+    async fn a_panicking_host_call_fails_the_plugin_call() {
+        struct Panics;
+        impl PluginHostCalls for Panics {
+            fn storage_query(&self, _: &[u8]) -> Result<Vec<u8>, String> {
+                panic!("host implementation bug")
+            }
+            fn invoice_create(&self, _: &[u8]) -> Result<Vec<u8>, String> {
+                Err("unused".to_string())
+            }
+            fn merchant_volume(&self, _: &[u8]) -> Result<Vec<u8>, String> {
+                Err("unused".to_string())
+            }
+            fn merchant_volumes(&self, _: &[u8]) -> Result<Vec<u8>, String> {
+                Err("unused".to_string())
+            }
+            fn account_notice(&self, _: &[u8]) -> Result<Vec<u8>, String> {
+                Err("unused".to_string())
+            }
+            fn account_standing(&self, _: &[u8]) -> Result<Vec<u8>, String> {
+                Err("unused".to_string())
+            }
+        }
+        let host = PluginHost::new(host_version(), 100, Duration::from_millis(500));
+        host.register_with_calls(
+            manifest_for("cash.random.panicstore"),
+            &crate::runtime::fixtures::host_calling_module(),
+            Some(Arc::new(Panics)),
+        )
+        .unwrap();
+        let id = PluginId::new("cash.random.panicstore").unwrap();
+
+        let reason = host
+            .run_query::<_, serde_json::Value>(&id, "call", &serde_json::json!({}))
+            .await
+            .unwrap_err();
         assert!(
-            host.instance_is_free(&id),
-            "the abandoned call still holds the instance"
+            reason.contains("storage_query") && reason.contains("panicked"),
+            "{reason}"
         );
+        assert_eq!(host.status(&id).unwrap().consecutive_failures, 1);
+    }
+
+    /// The abandoned invoice create runs to completion after the caller has
+    /// been told it failed. That is the duplicate-on-retry hazard: the failure
+    /// reason says so, and the caller must not treat it as "not issued".
+    #[tokio::test]
+    async fn an_abandoned_invoice_create_still_lands_and_the_failure_says_so() {
+        let (host, id, landed) = host_with_slow_calls(
+            Duration::from_millis(300),
+            &crate::runtime::fixtures::invoice_calling_module(),
+            "cash.random.slowinvoice",
+        );
+
+        let reason = host
+            .run_query::<_, serde_json::Value>(&id, "call", &serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(reason.contains("invoice_create"), "{reason}");
+        assert!(reason.contains("may still land"), "{reason}");
+        assert!(!landed.load(Ordering::SeqCst));
+
+        tokio::time::sleep(Duration::from_millis(400)).await;
+        assert!(landed.load(Ordering::SeqCst));
     }
 
     /// The fire-and-forget path has its own copy of the wall-clock arm: a
@@ -1308,8 +1419,8 @@ mod admin_toggle_tests {
 
         assert_eq!(host.status(&id).unwrap().consecutive_failures, 1);
         assert!(
-            !host.instance_is_free(&id),
-            "the abandoned host call should still hold the instance"
+            host.instance_is_free(&id),
+            "the abandoned host call must not hold the instance past the deadline"
         );
     }
 
