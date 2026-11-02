@@ -12,7 +12,7 @@ env:
 jobs:
   verify:
     name: Verify
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -102,3 +102,12 @@ jobs:
             exit 1
           fi
           grep -E '^ *Summary \[.*\] [0-9]+ tests? run: [0-9]+ passed, 0 skipped$' nextest.log
+
+      # The runner image decides whether a job can run at all, so it is ours to
+      # choose. `ubuntu-latest` moved to Ubuntu 26.04 and broke jobs across the
+      # fleet with nothing comparing the pinned jobs to the floating ones.
+      - name: Every job names its runner image
+        run: ./scripts/check-runner-pin.sh
+
+      - name: Runner-pin guard self-test
+        run: ./scripts/check-runner-pin-selftest.sh
