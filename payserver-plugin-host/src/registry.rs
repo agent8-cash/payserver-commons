@@ -32,6 +32,8 @@ pub struct PluginRegistry {
     /// registered, so `loaded` stays empty no matter what is offered to it.
     /// Set once at construction from boot config - see `Config::safe_mode`.
     safe_mode: bool,
+    /// Per-id version floors. An id with no entry has no floor.
+    min_versions: HashMap<PluginId, Version>,
 }
 
 impl PluginRegistry {
@@ -40,7 +42,17 @@ impl PluginRegistry {
             host_version,
             loaded: HashMap::new(),
             safe_mode: false,
+            min_versions: HashMap::new(),
         }
+    }
+
+    /// Sets the minimum version each listed plugin id must declare. Ids not
+    /// listed have no floor. Applies to future [`register`](Self::register)
+    /// calls only.
+    #[must_use]
+    pub fn with_minimum_versions(mut self, min_versions: HashMap<PluginId, Version>) -> Self {
+        self.min_versions = min_versions;
+        self
     }
 
     /// Puts the registry in safe mode: every future [`register`](Self::register)
@@ -64,6 +76,7 @@ impl PluginRegistry {
     ///   the error names both the requirement and the host version, since a
     ///   refusal that does not say which version was wanted is the failure
     ///   mode admins actually hit;
+    /// - its version is below the minimum configured for its id;
     /// - its id is already registered — the second manifest is refused, not
     ///   merged over the first.
     pub fn register(&mut self, manifest: Manifest) -> Result<(), PluginLoadError> {
@@ -82,6 +95,18 @@ impl PluginRegistry {
                 plugin_id: manifest.id.clone(),
                 requirement: dependency.requirement.clone(),
                 host_version: self.host_version.clone(),
+            });
+        }
+
+        if let Some(min) = self
+            .min_versions
+            .get(&manifest.id)
+            .filter(|min| manifest.version < **min)
+        {
+            return Err(PluginLoadError::BelowMinimumVersion {
+                plugin_id: manifest.id.clone(),
+                minimum: min.clone(),
+                actual: manifest.version.clone(),
             });
         }
 
@@ -218,6 +243,83 @@ mod tests {
         assert_eq!(registry.len(), 1);
         // The first registration is untouched, not overwritten by the refused one.
         assert_eq!(registry.get(&first.id), Some(&first));
+    }
+
+    fn minimums(id: &str, version: &str) -> HashMap<PluginId, Version> {
+        HashMap::from([(PluginId::new(id).unwrap(), Version::parse(version).unwrap())])
+    }
+
+    /// A manifest whose version is below the floor configured for its id is
+    /// refused, and the error names both the floor and the manifest version.
+    #[test]
+    fn refuses_a_manifest_below_its_configured_minimum_version() {
+        let mut registry =
+            host("1.2.5").with_minimum_versions(minimums("cash.random.billing", "0.2.0"));
+        let manifest = manifest(
+            r#"
+                id = "cash.random.billing"
+                version = "0.1.0"
+                dependencies = ["ethpayserver:^1.2.0"]
+                kind = "action"
+            "#,
+        );
+
+        let err = registry.register(manifest).unwrap_err();
+        assert_eq!(
+            err,
+            PluginLoadError::BelowMinimumVersion {
+                plugin_id: PluginId::new("cash.random.billing").unwrap(),
+                minimum: Version::parse("0.2.0").unwrap(),
+                actual: Version::parse("0.1.0").unwrap(),
+            }
+        );
+        let message = err.to_string();
+        assert!(
+            message.contains("0.1.0"),
+            "error should name the version: {message}"
+        );
+        assert!(
+            message.contains("0.2.0"),
+            "error should name the minimum: {message}"
+        );
+        assert!(registry.is_empty());
+    }
+
+    /// A manifest at or above its configured floor registers normally.
+    #[test]
+    fn accepts_a_manifest_at_or_above_its_configured_minimum_version() {
+        let mut registry =
+            host("1.2.5").with_minimum_versions(minimums("cash.random.billing", "0.1.0"));
+        let manifest = manifest(
+            r#"
+                id = "cash.random.billing"
+                version = "0.1.0"
+                dependencies = ["ethpayserver:^1.2.0"]
+                kind = "action"
+            "#,
+        );
+
+        registry.register(manifest).unwrap();
+        assert_eq!(registry.len(), 1);
+    }
+
+    /// A plugin id with no configured floor registers exactly as before, even
+    /// when other ids do have floors.
+    #[test]
+    fn accepts_any_version_for_a_plugin_id_with_no_configured_minimum() {
+        let mut registry =
+            host("1.2.5").with_minimum_versions(minimums("cash.random.other", "9.9.9"));
+        let manifest = manifest(
+            r#"
+                id = "cash.random.billing"
+                version = "0.0.1"
+                dependencies = ["ethpayserver:^1.2.0"]
+                kind = "action"
+            "#,
+        );
+
+        registry.register(manifest).unwrap();
+        assert_eq!(registry.len(), 1);
     }
 
     /// In safe mode, a manifest that would otherwise register just fine is

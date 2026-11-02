@@ -20,6 +20,14 @@ pub enum PluginLoadError {
         host_version: Version,
     },
 
+    /// The manifest's version is below the floor configured for its id.
+    #[error("plugin {plugin_id} version {actual} is below the minimum {minimum}")]
+    BelowMinimumVersion {
+        plugin_id: PluginId,
+        minimum: Version,
+        actual: Version,
+    },
+
     /// Some other manifest already registered this id.
     #[error("plugin id {0} is already registered")]
     DuplicateId(PluginId),
