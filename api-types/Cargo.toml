@@ -18,7 +18,7 @@ uuid = { version = "1.11", features = ["v4", "serde"] }
 # constraint that rules out ring, openssl and the like in this crate.
 sha2 = "0.10"
 hex = "0.4"
-utoipa = { version = "5.3", features = ["uuid", "chrono"], optional = true }
+utoipa = { version = "6", features = ["uuid", "chrono"], optional = true }
 
 # WASM: `uuid` refuses to build for wasm32-unknown-unknown without an explicit
 # randomness source. The `js` feature routes it to `crypto.getRandomValues`,

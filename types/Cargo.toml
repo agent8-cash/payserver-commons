@@ -16,7 +16,7 @@ uuid = { version = "1.11", features = ["v4", "serde"] }
 tokio = { version = "1.42", features = ["sync"] }
 async-trait = "0.1"
 futures = "0.3"
-utoipa = { version = "5.3", features = ["uuid", "chrono"], optional = true }
+utoipa = { version = "6", features = ["uuid", "chrono"], optional = true }
 
 # WASM: `uuid` refuses to build for wasm32-unknown-unknown without an explicit
 # randomness source. The `js` feature routes it to `crypto.getRandomValues`,
