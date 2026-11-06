@@ -131,9 +131,9 @@ pub struct DeepHealthResponse {
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebAuthnHealth {
-    /// Effective relying party id, e.g. `testnet.random.cash`.
+    /// Effective relying party id, e.g. `testnet.agent8.cash`.
     pub rp_id: String,
-    /// Effective relying party origin, e.g. `https://testnet.random.cash`.
+    /// Effective relying party origin, e.g. `https://testnet.agent8.cash`.
     pub rp_origin: String,
 }
 
@@ -235,12 +235,12 @@ mod tests {
             "redis": {"status": "ok", "latency_ms": 1},
             "rpcs": {},
             "monitor": {"status": "ok", "data_fresh": true},
-            "webauthn": {"rp_id": "testnet.random.cash", "rp_origin": "https://testnet.random.cash"}
+            "webauthn": {"rp_id": "testnet.agent8.cash", "rp_origin": "https://testnet.agent8.cash"}
         }"#;
         let parsed: DeepHealthResponse = serde_json::from_str(json).expect("parse");
         let w = parsed.webauthn.expect("webauthn block");
-        assert_eq!(w.rp_id, "testnet.random.cash");
-        assert_eq!(w.rp_origin, "https://testnet.random.cash");
+        assert_eq!(w.rp_id, "testnet.agent8.cash");
+        assert_eq!(w.rp_origin, "https://testnet.agent8.cash");
 
         // The deploy check reads these by jq path, so the wire names matter as
         // much as the values.
