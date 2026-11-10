@@ -7,13 +7,16 @@
 //! primitives stack, row, grid and section - so there is nothing the
 //! merchant dashboard renders that a plugin page cannot.
 //!
-//! Static rendering, with one way out. There is no action system: a plugin
-//! cannot make a button POST back into itself, and adding one means CSRF,
-//! idempotency and an action-routing design that the money path deserves
-//! more care over than a first slice can give it.
+//! Static rendering. Plugins can declare actions that forms on pages
+//! submit back to them - plugin-chosen action ids with form field data.
+//! The host handles CSRF and idempotency concerns at the HTTP layer;
+//! a plugin's action simply runs and reports success or failure.
 //!
-//! What a button can do is *link*. That is enough for the case that
-//! actually blocks revenue - a plugin issues an invoice through the host's
+//! A form's children can carry optional `name` fields so the client can
+//! collect field values for the submission; without a name, a field
+//! contributes to layout but not to the action payload. What a button can
+//! do is *link*. That is enough for the case where a plugin wants to send
+//! a merchant elsewhere - a plugin issues an invoice through the host's
 //! `invoice_create` import and points the merchant at the checkout the host
 //! already serves - without inventing a second way to move money. A button
 //! with no `href` still renders and still does nothing, and the client is
@@ -321,6 +324,42 @@ pub struct Section {
     pub children: Vec<PageElement>,
 }
 
+/// An action a plugin page can trigger through a form submission.
+///
+/// The plugin-chosen `action_id` identifies which action is being invoked;
+/// `data` carries the form field values the client collected (from elements
+/// that have a `name` field). The host handles CSRF and idempotency concerns;
+/// the plugin simply runs its action and reports success or failure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct PageAction {
+    /// Plugin-chosen identifier for this action (e.g., "cancel_subscription")
+    pub action_id: String,
+    /// Form field values collected from the form: field_name -> value.
+    /// Only present if the form had named fields.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data: Option<serde_json::Value>,
+}
+
+/// What the plugin returns from its `handle_action` export.
+///
+/// The host presents `message` to the merchant if present; `reason` is logged
+/// on failure but not shown to the user. A successful action always has
+/// `success: true`; on failure, `success: false` with optional `message` and
+/// `reason`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(feature = "openapi", derive(utoipa::ToSchema))]
+pub struct PageActionResponse {
+    /// True if action succeeded, false otherwise
+    pub success: bool,
+    /// Message to show the user on success or failure
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Technical reason for failure, logged but not user-facing
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -545,5 +584,54 @@ mod tests {
                 tone: Tone::Neutral,
             })
         );
+    }
+
+    /// A PageAction with no data serializes correctly and omits the null.
+    #[test]
+    fn page_action_without_data_serializes_minimal() {
+        let action = PageAction {
+            action_id: "cancel".to_string(),
+            data: None,
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        assert_eq!(json, r#"{"action_id":"cancel"}"#);
+        assert!(!json.contains("data"));
+    }
+
+    /// A PageAction with form data round-trips through JSON.
+    #[test]
+    fn page_action_with_data_round_trips() {
+        let action = PageAction {
+            action_id: "update".to_string(),
+            data: Some(serde_json::json!({"amount": "100", "memo": "test"})),
+        };
+        let json = serde_json::to_string(&action).unwrap();
+        let parsed: PageAction = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, action);
+    }
+
+    /// A PageActionResponse with only success round-trips.
+    #[test]
+    fn page_action_response_success_only() {
+        let response = PageActionResponse {
+            success: true,
+            message: None,
+            reason: None,
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        assert_eq!(json, r#"{"success":true}"#);
+    }
+
+    /// A PageActionResponse with message and reason round-trips.
+    #[test]
+    fn page_action_response_with_details() {
+        let response = PageActionResponse {
+            success: false,
+            message: Some("Your subscription could not be cancelled".to_string()),
+            reason: Some("invoice_pending".to_string()),
+        };
+        let json = serde_json::to_string(&response).unwrap();
+        let parsed: PageActionResponse = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, response);
     }
 }

@@ -35,8 +35,8 @@ pub use kind::PluginKind;
 pub use manifest::{InvalidManifest, Manifest, PageDeclaration, PageIcon, PagePlacement};
 pub use page::{
     Badge, Button, ButtonVariant, Card, Direction, Field, Fields, Figure, Form, Grid, Input,
-    Notice, PageElement, Row, Section, Select, Stack, Tab, Table, Tabs, Text, TextStyle, Tone,
-    Viewer,
+    Notice, PageAction, PageActionResponse, PageElement, Row, Section, Select, Stack, Tab,
+    Table, Tabs, Text, TextStyle, Tone, Viewer,
 };
 pub use slug::{InvalidSlug, PluginSlug, RESERVED_SLUGS};
 pub use standing_basis::StandingBasis;
@@ -49,7 +49,7 @@ pub use semver::{Version, VersionReq};
 /// page descriptor types exactly as a consumer (a plugin crate) would.
 #[cfg(test)]
 mod reachability {
-    use crate::{Badge, Figure, PageElement, Tone, Viewer};
+    use crate::{Badge, Figure, PageAction, PageActionResponse, PageElement, Tone, Viewer};
 
     #[test]
     fn page_descriptor_types_are_reachable_from_the_crate_root() {
@@ -66,5 +66,18 @@ mod reachability {
             tone: Tone::Success,
         });
         assert!(matches!(figure, PageElement::Figure(_)));
+
+        let action = PageAction {
+            action_id: "test".to_string(),
+            data: None,
+        };
+        assert_eq!(action.action_id, "test");
+
+        let response = PageActionResponse {
+            success: true,
+            message: None,
+            reason: None,
+        };
+        assert!(response.success);
     }
 }
