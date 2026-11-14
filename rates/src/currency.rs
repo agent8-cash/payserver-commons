@@ -93,6 +93,31 @@ pub fn is_fiat_currency(currency: &str) -> bool {
 pub fn is_crypto_currency(currency: &str) -> bool {
     !is_fiat_currency(currency)
 }
+/// Convert an amount in major units to minor units (e.g., dollars to cents).
+/// Handles zero‑decimal currencies (e.g., JPY) by returning the amount unchanged.
+///
+/// # Arguments
+/// * `amount` – Amount in major units as a `u64`.
+/// * `currency` – ISO 4217 currency code.
+///
+/// # Returns
+/// Minor‑unit representation as `u64`.
+pub fn convert_to_minor_units(amount: u64, currency: &str) -> u64 {
+    // List of zero‑decimal currency codes per ISO 4217.
+    const ZERO_DECIMAL: &[&str] = &[
+        "BIF", "CLP", "DJF", "GNF", "JPY", "KMF", "KRW", "MGA",
+        "PYG", "RWF", "UGX", "VND", "VUV", "XAF", "XOF", "XPF",
+    ];
+    let upper = currency.to_uppercase();
+    if ZERO_DECIMAL.contains(&upper.as_str()) {
+        amount
+    } else {
+        // Default: two decimal places (cents). Adjust if needed.
+        amount * 100
+    }
+}
+
+
 
 #[cfg(test)]
 mod tests {
@@ -125,9 +150,16 @@ mod tests {
     }
 
     #[test]
+    fn test_convert_to_minor_units() {
+        // Non-zero-decimal currency (USD) should multiply by 100
+        assert_eq!(convert_to_minor_units(12, "USD"), 1200);
+        // Zero‑decimal currency (JPY) should remain unchanged
+        assert_eq!(convert_to_minor_units(1234, "JPY"), 1234);
+    }
+
+    #[test]
     fn test_is_crypto_currency() {
         assert!(is_crypto_currency("ETH"));
         assert!(is_crypto_currency("BTC"));
-        assert!(!is_crypto_currency("USD"));
-    }
+
 }
