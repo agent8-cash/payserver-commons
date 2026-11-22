@@ -133,6 +133,9 @@ pub struct WebhookResponse {
     pub enabled: bool,
     /// Creation timestamp.
     pub created_at: chrono::DateTime<chrono::Utc>,
+    /// Indicates if the webhook secret was rotated in this response.
+    #[serde(default)]
+    pub rotate_secret: bool,
     /// Last update timestamp.
     pub updated_at: chrono::DateTime<chrono::Utc>,
 }
@@ -146,6 +149,9 @@ pub struct ConfigureWebhookRequest {
     /// Whether the webhook is enabled.
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    /// Request a new webhook secret. Omitted or false leaves the current secret in place.
+    #[serde(default)]
+    pub rotate_secret: bool,
 }
 /// Store settings response.
 #[cfg_attr(feature = "openapi", derive(ToSchema))]
