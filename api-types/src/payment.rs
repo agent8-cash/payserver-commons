@@ -59,6 +59,7 @@ pub struct PaymentListResponse {
 }
 
 /// Refund response.
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RefundResponse {
     pub id: Uuid,
@@ -79,6 +80,7 @@ pub struct RefundResponse {
 }
 
 /// Request body for creating a refund.
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateRefundRequest {
     /// Optional partial refund amount (in smallest unit).
@@ -88,6 +90,7 @@ pub struct CreateRefundRequest {
     pub reason: Option<String>,
 }
 /// Payout response.
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PayoutResponse {
     pub id: Uuid,
@@ -107,6 +110,7 @@ pub struct PayoutResponse {
 }
 
 /// Payout list response with pagination.
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PayoutListResponse {
     pub total: i64,
@@ -114,6 +118,7 @@ pub struct PayoutListResponse {
 }
 
 /// Request body for creating a payout.
+#[cfg_attr(feature = "openapi", derive(ToSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreatePayoutRequest {
     /// Invoice IDs to include in this payout.
